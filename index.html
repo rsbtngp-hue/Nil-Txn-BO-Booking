@@ -115,39 +115,9 @@ body[data-theme="violet"] .app-tab#tabNil{background:linear-gradient(125deg,#704
 @media(max-width:680px){.brand-logo{width:84px}.hero-top{align-items:flex-start;flex-wrap:wrap}.hero h1{font-size:19px}}
 </style>
 
-<!-- Nagpur Region employee portal access gate -->
-<style id="npr-employee-access-style">
-html body{visibility:hidden!important}
-html body.npr-auth-ok{visibility:visible!important}
-#nprAuthChecking{visibility:visible!important;position:fixed!important;inset:0!important;z-index:2147483647!important;display:flex!important;align-items:center!important;justify-content:center!important;background:#f3f6fb!important;color:#14213d!important;font:16px Arial,sans-serif!important;text-align:center!important;padding:24px!important;box-sizing:border-box!important}
-</style>
+
 </head>
-<body><script id="nprEmployeeDashboardAccessGate">
-(function(){
- 'use strict';
- var PORTAL="https://script.google.com/macros/s/AKfycbwGfQLoPhrb-RYfcvCNOFIlkluPEf64UvcIHMjNMDAfXTocNZSGtbf-Hw-tmv6EAmSi/exec";
- var TOKEN='nagpurEmployeePortalToken';
- var overlay=document.getElementById('nprAuthChecking');
- function showDashboard(){
-  function reveal(){
-   if(document.body)document.body.classList.add('npr-auth-ok');
-   if(overlay&&overlay.parentNode)overlay.parentNode.removeChild(overlay);
-  }
-  if(document.body)reveal();
-  else document.addEventListener('DOMContentLoaded',reveal,{once:true});
- }
- var token='';
- try{token=localStorage.getItem(TOKEN)||'';}catch(e){}
- if(token){
-  // The main portal already validated the employee. Do not revalidate on every
-  // static dashboard page; a transient Apps Script failure must not force login.
-  showDashboard();
-  return;
- }
- var returnTo=window.location.href;
- window.location.replace(PORTAL+'?returnTo='+encodeURIComponent(returnTo));
-})();
-</script>
+<body>
 
 <header class="hero">
   <div class="hero-top">
