@@ -13,6 +13,7 @@
  */
 const MASTER_SHEET='Office Master';
 const DAILY_SHEET='Daily Nil Transactions';
+const DAILY_STAGING_SHEET='Daily Nil Transactions Upload Staging';
 const BOOKING_SHEET='BO Booking Performance';
 const BOOKING_STAGING_SHEET='BO Booking Performance Staging';
 const EXCLUSIONS_SHEET='Dashboard Office Exclusions';
@@ -65,6 +66,7 @@ function doPost(e){
     if(req.action==='beginSync') result=beginSync_(req.type,req.months);
     else if(req.action==='saveBatch') result=saveBatch_(req.type,normalizeRows_(req.rows));
     else if(req.action==='commitBooking') result=commitBooking_();
+    else if(req.action==='commitDailyMissing') result=commitDailyMissing_();
     else if(req.action==='saveExclusions') result=saveExclusions_(req.excludedOfficeIds);
     else throw new Error('Unsupported action: '+String(req.action||''));
     return jsonOutput_({ok:true,result:result});
@@ -77,6 +79,8 @@ function setupSheets(){
   ensureSheet_(ss,DAILY_SHEET,DAILY_HEADERS);
   ensureSheet_(ss,BOOKING_SHEET,BOOKING_HEADERS);
   const staging=ensureSheet_(ss,BOOKING_STAGING_SHEET,BOOKING_HEADERS);
+  const dailyStaging=ensureSheet_(ss,DAILY_STAGING_SHEET,DAILY_HEADERS);
+  try{dailyStaging.hideSheet();}catch(e){}
   try{staging.hideSheet();}catch(e){}
   ensureExclusionsSheet_();
   return 'Google Sheets storage is ready, including shared dashboard exclusions.';
@@ -84,6 +88,7 @@ function setupSheets(){
 function beginSync(type,months){return beginSync_(type,months);}
 function saveBatch(type,rows){return saveBatch_(type,normalizeRows_(rows));}
 function commitBooking(){return commitBooking_();}
+function commitDailyMissing(){return commitDailyMissing_();}
 
 function normalizeRows_(rows){
   if(Array.isArray(rows))return rows;
@@ -94,6 +99,11 @@ function normalizeRows_(rows){
 }
 
 function beginSync_(type,months){
+  if(type==='daily_missing'){
+    const staging=getRequiredSheet_(DAILY_STAGING_SHEET),last=staging.getLastRow();
+    if(last>1)staging.getRange(2,1,last-1,DAILY_HEADERS.length).clearContent();
+    return{sheet:staging.getName(),clearedRows:Math.max(0,last-1),scope:'staged missing daily rows; live data preserved until merge'};
+  }
   if(type==='booking'){
     const staging=getRequiredSheet_(BOOKING_STAGING_SHEET),last=staging.getLastRow();
     if(last>1)staging.getRange(2,1,last-1,BOOKING_HEADERS.length).clearContent();
@@ -122,8 +132,8 @@ function saveBatch_(type,rows){
   if(!Array.isArray(rows))rows=normalizeRows_(rows);
   if(!rows.length)return{saved:0};
   if(rows.length>500)throw new Error('Batch too large. Send no more than 500 rows per request.');
-  const isMaster=type==='master',isBooking=type==='booking';
-  const sh=isBooking?getRequiredSheet_(BOOKING_STAGING_SHEET):getTargetSheet_(type);
+  const isMaster=type==='master',isBooking=type==='booking',isDailyMissing=type==='daily_missing';
+  const sh=isBooking?getRequiredSheet_(BOOKING_STAGING_SHEET):(isDailyMissing?getRequiredSheet_(DAILY_STAGING_SHEET):getTargetSheet_(type));
   const width=isMaster?MASTER_HEADERS.length:(isBooking?BOOKING_HEADERS.length:DAILY_HEADERS.length),now=new Date();
   const values=rows.map(r=>{
     r=r||{};
@@ -135,8 +145,46 @@ function saveBatch_(type,rows){
   try{
     const start=Math.max(2,sh.getLastRow()+1);sh.getRange(start,1,values.length,width).setValues(values);
     if(!isMaster&&!isBooking){sh.getRange(start,3,values.length,1).setNumberFormat('@');sh.getRange(start,11,values.length,1).setNumberFormat('yyyy-mm-dd hh:mm:ss');}
-    if(!isBooking)stampSync_(type);SpreadsheetApp.flush();
+    if(!isBooking&&!isDailyMissing)stampSync_(type);SpreadsheetApp.flush();
     return{sheet:sh.getName(),saved:values.length,startRow:start};
+  }finally{lock.releaseLock();}
+}
+
+/**
+ * Merge staged local Daily Nil Transactions into the live sheet without deleting
+ * historical data. Existing rows are identified by office_id + transac_date.
+ * Only keys not already present in the live sheet are appended.
+ */
+function commitDailyMissing_(){
+  const lock=LockService.getScriptLock();lock.waitLock(30000);
+  try{
+    const live=getRequiredSheet_(DAILY_SHEET),stage=getRequiredSheet_(DAILY_STAGING_SHEET);
+    const liveCount=Math.max(0,live.getLastRow()-1),stageCount=Math.max(0,stage.getLastRow()-1);
+    const existing=new Set();
+    if(liveCount){
+      live.getRange(2,1,liveCount,3).getDisplayValues().forEach(r=>{
+        const id=String(r[0]||'').trim(),date=normalizeSheetDate_(r[2]);
+        if(id&&date)existing.add(id+'|'+date);
+      });
+    }
+    const staged=stageCount?stage.getRange(2,1,stageCount,DAILY_HEADERS.length).getValues():[];
+    const append=[],seenStage=new Set();
+    staged.forEach(r=>{
+      const id=String(r[0]||'').trim(),date=normalizeSheetDate_(r[2]);
+      if(!id||!date)return;
+      const key=id+'|'+date;
+      if(existing.has(key)||seenStage.has(key))return;
+      seenStage.add(key);append.push(r);
+    });
+    if(append.length){
+      const start=Math.max(2,live.getLastRow()+1);
+      live.getRange(start,1,append.length,DAILY_HEADERS.length).setValues(append);
+      live.getRange(start,3,append.length,1).setNumberFormat('@');
+      live.getRange(start,11,append.length,1).setNumberFormat('yyyy-mm-dd hh:mm:ss');
+    }
+    if(stage.getLastRow()>1)stage.getRange(2,1,stage.getLastRow()-1,DAILY_HEADERS.length).clearContent();
+    stampSync_('daily');SpreadsheetApp.flush();
+    return{sheet:DAILY_SHEET,stagedRows:stageCount,insertedRows:append.length,skippedExisting:stageCount-append.length,timestamp:new Date().toISOString()};
   }finally{lock.releaseLock();}
 }
 
