@@ -227,9 +227,59 @@ function getTargetSheet_(type){
 function getRequiredSheet_(name){const sh=SpreadsheetApp.getActiveSpreadsheet().getSheetByName(name);if(!sh)throw new Error('Sheet "'+name+'" not found. Run setupSheets() first.');return sh;}
 function ensureSheet_(ss,name,headers){
   let sh=ss.getSheetByName(name);if(!sh)sh=ss.insertSheet(name);
-  if(sh.getLastRow()===0)sh.getRange(1,1,1,headers.length).setValues([headers]);
-  else{const got=sh.getRange(1,1,1,headers.length).getDisplayValues()[0];if(!headers.every((h,i)=>String(got[i]||'').trim()===h))throw new Error('Header mismatch in "'+name+'". Expected: '+headers.join(', '));}
+  if(sh.getLastRow()===0){
+    sh.getRange(1,1,1,headers.length).setValues([headers]);
+  }else{
+    const got=sh.getRange(1,1,1,Math.max(1,sh.getLastColumn())).getDisplayValues()[0].map(v=>String(v||'').trim());
+    const exact=headers.every((h,i)=>got[i]===h);
+    if(!exact && (name===BOOKING_SHEET || name===BOOKING_STAGING_SHEET)){
+      repairBookingSheetColumns_(sh,headers,got);
+    }else if(!exact){
+      throw new Error('Header mismatch in "'+name+'". Expected: '+headers.join(', ')+'. Actual: '+got.join(', '));
+    }
+  }
   sh.setFrozenRows(1);sh.getRange(1,1,1,headers.length).setFontWeight('bold').setBackground('#dbeafe').setWrap(true);return sh;
+}
+
+/**
+ * Repairs a Booking sheet whose columns were reordered or whose header labels
+ * differ slightly. Data is remapped by header name, not by column position.
+ * Unknown columns are not included in the canonical schema; a backup is made
+ * before rewriting so the original can be recovered if needed.
+ */
+function repairBookingSheetColumns_(sh,headers,actualHeaders){
+  const lastRow=sh.getLastRow(),lastCol=Math.max(sh.getLastColumn(),actualHeaders.length);
+  const normalize=h=>String(h||'').toLowerCase().replace(/[^a-z0-9]/g,'');
+  const aliases={
+    'circleid':'circle_id','circlename':'circle_name','regionid':'region_id','regionname':'region_name',
+    'divisionid':'division_id','divisionname':'division_name','subdivisionid':'sub_division_id',
+    'subdivisionname':'sub_division_name','officeid':'office_id','officename':'office_name',
+    'bookingdate':'booking_date','date':'booking_date','productname':'product_name',
+    'walkincustomer':'walk_in_customer','registeredbulk':'registered_bulk','onpostalservice':'on_postal_service',
+    'govtservice':'govt_service','walkinnoncommercial':'walk_in_non_commercial','noncommercial':'non_commercial',
+    'commercial':'commercial','ecommerce':'e_commerce','pidpi':'pidpi','studentmail':'student_mail',
+    'others':'others','walkincommercial':'walk_in_commercial','walkinecommerce':'walk_in_e_commerce',
+    'bulknoncommercial':'bulk_non_commercial','bulkcommercial':'bulk_commercial','bulkecommerce':'bulk_e_commerce',
+    'borebooking':'bo_rebooking','freeactiveservice':'free_active_service','interfpo':'inter_fpo'
+  };
+  const canonicalByNorm={};headers.forEach(h=>canonicalByNorm[normalize(h)]=h);
+  const sourceIndex={};
+  actualHeaders.forEach((h,i)=>{
+    const n=normalize(h),key=aliases[n]||canonicalByNorm[n];
+    if(key && sourceIndex[key]===undefined)sourceIndex[key]=i;
+  });
+  const values=lastRow>1?sh.getRange(2,1,lastRow-1,lastCol).getValues():[];
+  const mapped=values.map(row=>headers.map(h=>sourceIndex[h]===undefined?'':row[sourceIndex[h]]));
+  // Make a backup only when data exists and the header schema actually differs.
+  if(lastRow>1){
+    const ss=sh.getParent(),backupName=sh.getName()+' Backup '+Utilities.formatDate(new Date(),Session.getScriptTimeZone(),'yyyyMMdd_HHmmss');
+    const backup=ss.insertSheet(backupName);
+    sh.getRange(1,1,lastRow,lastCol).copyTo(backup.getRange(1,1),{contentsOnly:false});
+  }
+  sh.clearContents();
+  sh.getRange(1,1,1,headers.length).setValues([headers]);
+  if(mapped.length)sh.getRange(2,1,mapped.length,headers.length).setValues(mapped);
+  SpreadsheetApp.flush();
 }
 function safeCell_(v){if(v===null||v===undefined)return'';if(typeof v==='string'&&/^[=+@]/.test(v))return"'"+v;return v;}
 function stampSync_(type){PropertiesService.getScriptProperties().setProperty(type==='master'?'lastMasterWrite':'lastDailyWrite',new Date().toISOString());}
