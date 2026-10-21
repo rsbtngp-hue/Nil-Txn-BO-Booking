@@ -29,7 +29,7 @@ Open the Google Apps Script project currently used by the dashboard's `APPS_SCRI
 - `setupSheets()` creates the hidden `Daily Nil Transactions Upload Staging` sheet needed for this upload action.
 - Existing `health`, `getMaster`, `getDaily`, `getBooking`, `status`, `beginSync`, `saveBatch`, and `commitBooking` actions remain available.
 
-## 4. One-time setup for the new upload button\n\nAfter replacing the Apps Script source, run `setupSheets()` once from the Apps Script editor and approve the requested permissions. This creates the hidden staging sheet without deleting live Daily Nil Transactions rows. Then deploy a **New version** of the existing web app. The dashboard's new **Upload Local Daily Data** button will report progress and will not clear existing records.\n\n## 5. Verify after deployment
+## 4. One-time setup for the new upload button\n\nAfter replacing the Apps Script source, deploy a **New version** of the existing web app. The updated upload action creates its hidden staging sheet automatically on first use; running `setupSheets()` is optional. Existing live Daily Nil Transactions rows are not cleared.\n\n## 5. Verify after deployment
 
 Open these using the current deployed `/exec` URL:
 
