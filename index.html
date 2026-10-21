@@ -131,7 +131,7 @@ body[data-theme="violet"] .app-tab#tabNil{background:linear-gradient(125deg,#704
     <span id="googlePill" class="sync-pill"><span class="sync-dot"></span><span id="googleLabel">Google Sheets: waiting</span></span>
     <span id="syncMessage" class="sync-message">Opening local database and checking Google Sheets…</span>
     <span id="syncTime" class="sync-time">Last sync: not yet</span>
-    <button id="manualGoogleSyncBtn" type="button" class="secondary" style="height:30px;padding:0 10px;font-size:12px;white-space:nowrap">↻ Sync Google Sheets</button>
+    <button id="manualGoogleSyncBtn" type="button" class="secondary" style="height:30px;padding:0 10px;font-size:12px;white-space:nowrap">↓ Download / Sync Google Sheets</button><button id="uploadMissingDailyBtn" type="button" style="height:30px;padding:0 10px;font-size:12px;white-space:nowrap">↑ Upload Local Daily Data</button>
   </div>
   <div class="mis-heading-status" aria-live="polite">
     <div class="mis-updated-status" id="dailyMisUpdated">Nil Transaction BO — MIS Data updated up to: Checking latest date…</div>
@@ -242,6 +242,7 @@ body[data-theme="violet"] .app-tab#tabNil{background:linear-gradient(125deg,#704
     </section>
   </div>
 </main>
+<div id="transferProgressModal" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="transferProgressTitle"><div class="modal" style="width:min(620px,96vw)"><div class="modal-head"><h2 id="transferProgressTitle">Google Sheets Data Transfer</h2><button id="transferCloseBtn" class="secondary" type="button" disabled>Close</button></div><div class="modal-body"><div id="transferStage" style="font-weight:700;color:#123e68;margin-bottom:8px">Preparing transfer…</div><div style="height:18px;border-radius:12px;background:#e5edf5;overflow:hidden;border:1px solid #c7d7e8"><div id="transferProgressBar" style="height:100%;width:0%;background:linear-gradient(90deg,#2376db,#00a389);transition:width .2s"></div></div><div style="display:flex;justify-content:space-between;gap:12px;margin-top:8px;font-size:12px;font-weight:700"><span id="transferPercent">0%</span><span id="transferRows">0 / 0 rows</span></div><div id="transferEta" class="note">Estimating time remaining…</div><div id="transferResult" class="note" style="white-space:normal"></div></div></div></div>
 <div id="adminLoginModal" class="modal-backdrop login-modal" role="dialog" aria-modal="true"><div class="modal"><div class="modal-head"><h2>Administrator Login</h2><button class="secondary" id="closeAdminLogin" type="button">Close</button></div><div class="modal-body"><p class="note" style="margin-top:0">Sign in to upload CSV files or manage Office Master.</p><label class="field" style="width:100%">Admin password<input id="adminPassword" type="password" autocomplete="current-password" placeholder="Enter admin password"></label><div class="login-error" id="loginError"></div><div class="modal-actions" style="margin-top:12px"><button id="adminLoginBtn" type="button">Sign In</button><button id="adminLogoutBtn" class="secondary hide" type="button">Logout</button></div><div class="note" id="adminState">Administrator tools are locked.</div></div></div></div>
 <div id="detailModal" class="modal-backdrop" role="dialog" aria-modal="true"><div class="modal"><div class="modal-head"><h2 id="modalTitle">Nil office details</h2><button class="secondary" onclick="closeModal()">Close</button></div><div class="modal-body"><div class="modal-actions"><button onclick="exportModalExcel()">Export Excel</button><button onclick="previewModalPDF()">Preview PDF in Chrome</button><button class="secondary" onclick="printModal()">Print / Save as PDF</button></div><p class="note" id="modalNote"></p><div class="tablebox"><table id="modalTable"></table></div></div></div></div>
 
@@ -421,14 +422,14 @@ async function fetchGoogleMaster(){
   throw lastErr||new Error('No Office Master download endpoint was available.');
 }
 async function fetchAllGoogleDailyPages(){
-  const pageSize=500;let offset=0,totalCount=null;const allRows=[];
+  const pageSize=500;let offset=0,totalCount=null;const allRows=[];showTransferProgress('Download Google Sheets','Downloading Daily Nil Transactions',0);
   while(totalCount===null||offset<totalCount){
     const payload=await googleGet('getDaily',{offset:String(offset),limit:String(pageSize)},60000);
     if(!payload||payload.ok!==true||!Array.isArray(payload.rows))throw new Error('Invalid Daily Nil Transactions page response.');
     if(totalCount===null){totalCount=Number(payload.totalCount);if(!Number.isFinite(totalCount)||totalCount<0)throw new Error('Google Sheets did not return a valid total row count.');}
     if(payload.rows.length===0&&offset<totalCount)throw new Error('Daily download stopped at row '+offset+' of '+totalCount+'. Existing local data was retained.');
     allRows.push(...payload.rows);offset+=payload.rows.length;
-    setSyncMessage('Initial Daily Nil Transactions download • '+allRows.length.toLocaleString()+' / '+totalCount.toLocaleString()+' rows');
+    setSyncMessage('Initial Daily Nil Transactions download • '+allRows.length.toLocaleString()+' / '+totalCount.toLocaleString()+' rows');updateTransferProgress('Downloading Daily Nil Transactions',allRows.length,totalCount);
   }
   if(allRows.length!==totalCount)throw new Error('Incomplete download: received '+allRows.length+' of '+totalCount+' rows.');
   return allRows;
@@ -573,26 +574,73 @@ async function manualGoogleSync(){
   if(btn)btn.disabled=true;
   if($('syncBtn'))$('syncBtn').disabled=true;
   try{
+    showTransferProgress('Download Google Sheets','Checking Google Sheets and downloading changes',0);
+    updateTransferProgress('Checking Google Sheets metadata',0,0);
     setSyncMessage('Manual Google Sheets sync started…');
     const messages=[],errors=[];
     try{const pulled=await fetchGoogleMaster();messages.push('Office Master '+pulled.count.toLocaleString()+' rows');}
     catch(e){errors.push('Office Master: '+(e.message||e));}
+    updateTransferProgress('Downloading Daily Nil Transactions and BO Booking Performance',0,0,'The server returns incremental data in one response; the exact row count will be shown when received.');
     const data=await downloadGoogleDailyAndBooking();
+    updateTransferProgress('Saving downloaded data to IndexedDB',1,1,'Local records are retained and merged; existing history is not cleared.');
     data.results.forEach(x=>messages.push(describeDatasetSyncResult(x)));
     errors.push(...data.errors);
     const summary=messages.join(' • ')+(errors.length?' • Issues: '+errors.join(' | '):' • All available datasets downloaded and saved locally.');
     setSyncMessage(summary,errors.length?'error':'ok');
     status(summary);
+    finishTransferProgress(summary,!errors.length);
     if(!errors.length)markSyncTime();
   }catch(e){
     const msg='Manual Google Sheets sync failed: '+(e.message||e)+'. Existing local data has been retained.';
-    setSyncMessage(msg,'error');status(msg);
+    setSyncMessage(msg,'error');status(msg);finishTransferProgress(msg,false);
   }finally{
     syncInProgress=false;
     if(btn)btn.disabled=false;
     if($('syncBtn'))$('syncBtn').disabled=false;
   }
 }
+async function uploadLocalDailyMissing(){
+  if(syncInProgress){setSyncMessage('Another Google Sheets transfer is already running. Please wait.');return;}
+  if(!localDbReady){setSyncMessage('Local database has not finished loading. Upload paused to protect local records.','error');return;}
+  if(!navigator.onLine){setSyncMessage('Offline — connect to the internet before uploading.','error');return;}
+  const rows=daily.filter(r=>String(r.office_id||'').trim()&&normalizeDate(r.transac_date));
+  if(!rows.length){alert('No valid Daily Nil Transactions are available in IndexedDB to upload.');return;}
+  if(!confirm('Upload '+rows.length.toLocaleString()+' local Daily Nil Transactions to Google Sheets? Existing Google rows will be preserved; duplicate office_id + transac_date records will be skipped.'))return;
+  syncInProgress=true;
+  const btn=$('uploadMissingDailyBtn');btn.disabled=true;
+  if($('manualGoogleSyncBtn'))$('manualGoogleSyncBtn').disabled=true;if($('syncBtn'))$('syncBtn').disabled=true;
+  showTransferProgress('Upload Local IndexedDB → Google Sheets','Checking Google Sheets before upload',rows.length);
+  try{
+    const before=await getGoogleStatus();
+    updateTransferProgress('Preparing safe, duplicate-checked upload',0,rows.length,'Local rows are staged first. The live Daily Nil Transactions sheet is not cleared.');
+    await gasCall('beginSync','daily_missing',[],[]);
+    const batchSize=250;let sent=0;
+    for(let i=0;i<rows.length;i+=batchSize){
+      const batch=rows.slice(i,i+batchSize);
+      await gasCall('saveBatch','daily_missing',batch,[]);
+      sent+=batch.length;
+      updateTransferProgress('Uploading local daily rows to secure staging',sent,rows.length);
+      status('Uploading Local IndexedDB → Google Sheets • '+sent.toLocaleString()+' / '+rows.length.toLocaleString());
+    }
+    updateTransferProgress('Merging staged rows; skipping existing office/date keys',rows.length,rows.length,'Do not close this window until Google Sheets verification completes.');
+    await gasCall('commitDailyMissing','daily_missing',[],[]);
+    const after=await getGoogleStatus();
+    const beforeCount=Number(before.dailyRows||0),afterCount=Number(after.dailyRows||0);
+    const writeChanged=String(after.lastDailyWrite||'')!==String(before.lastDailyWrite||'');
+    if(afterCount<beforeCount||!writeChanged)throw new Error('Google Sheets did not confirm the merge. The backend may need to be redeployed with the new daily-missing upload action. Local data has been retained.');
+    const inserted=afterCount-beforeCount;
+    const msg='Upload verified. '+inserted.toLocaleString()+' missing rows added to Google Sheets; '+Math.max(0,rows.length-inserted).toLocaleString()+' local rows were already present or duplicates. Google Daily Nil Transactions now has '+afterCount.toLocaleString()+' rows.';
+    finishTransferProgress(msg,true);status(msg);setSyncMessage(msg,'ok');markSyncTime();updateMisDateStatuses(after);
+  }catch(e){
+    const msg='Local → Google upload not verified: '+(e.message||e)+'. Local IndexedDB data has been retained; retry after checking Apps Script deployment.';
+    finishTransferProgress(msg,false);status(msg);setSyncMessage(msg,'error');
+  }finally{
+    syncInProgress=false;btn.disabled=false;if($('manualGoogleSyncBtn'))$('manualGoogleSyncBtn').disabled=false;if($('syncBtn'))$('syncBtn').disabled=false;
+  }
+}
+const uploadMissingDailyControl=$('uploadMissingDailyBtn');
+if(uploadMissingDailyControl)uploadMissingDailyControl.addEventListener('click',()=>uploadLocalDailyMissing());
+
 // Bind sync controls immediately after the sync functions are defined, before the rest of
 // dashboard initialization runs. This keeps manual sync usable if another startup widget fails.
 const manualSyncControl=$('manualGoogleSyncBtn');
@@ -1471,6 +1519,37 @@ function pdfTable(id, name){
   doc.autoTable({html:'#'+id,startY:35,margin:{left:12,right:12,bottom:14},tableWidth:'auto',styles:{fontSize:8,cellPadding:3,valign:'middle',halign:'center'},headStyles:{halign:'center',fillColor:[22,79,130]},bodyStyles:{halign:'center'},theme:'grid',didDrawPage:pdfFooterHook(doc),didParseCell:function(data){if(data.section==='body'&&data.row.index===data.table.body.length-1){data.cell.styles.fillColor=[18,62,104];data.cell.styles.textColor=[255,255,255];data.cell.styles.fontStyle='bold';}}});
   const blob=doc.output('blob'),url=URL.createObjectURL(blob),w=window.open(url,'_blank');if(!w){status('Chrome blocked the PDF preview popup. Allow pop-ups for this local HTML and try again.');return;}status('PDF preview opened in Chrome. Use the browser PDF toolbar to print or save.');
 }
+
+let transferStartedAt=0,transferLastLabel='';
+function showTransferProgress(title,stage,total=0){
+  transferStartedAt=Date.now();transferLastLabel=stage;
+  $('transferProgressTitle').textContent=title;$('transferStage').textContent=stage;
+  $('transferProgressBar').style.width='0%';$('transferPercent').textContent=total?'0%':'Working…';
+  $('transferRows').textContent=total?'0 / '+Number(total).toLocaleString()+' rows':'Waiting for server response…';
+  $('transferEta').textContent='Estimating time remaining…';$('transferResult').textContent='';
+  $('transferCloseBtn').disabled=true;$('transferProgressModal').style.display='flex';
+}
+function updateTransferProgress(stage,done,total,detail=''){
+  transferLastLabel=stage;$('transferStage').textContent=stage;
+  const pct=total>0?Math.min(100,Math.floor(done/total*100)):0;
+  $('transferProgressBar').style.width=pct+'%';$('transferPercent').textContent=total?pct+'%':'Working…';
+  $('transferRows').textContent=total?Number(done).toLocaleString()+' / '+Number(total).toLocaleString()+' rows':'Waiting for server response…';
+  const elapsed=(Date.now()-transferStartedAt)/1000,rate=done>0&&elapsed>0?done/elapsed:0,remaining=total>done&&rate>0?Math.ceil((total-done)/rate):null;
+  $('transferEta').textContent=remaining===null?'Estimated time remaining: calculating…':'Elapsed '+formatTransferTime(elapsed)+' • Estimated remaining '+formatTransferTime(remaining);
+  if(detail)$('transferResult').textContent=detail;
+}
+function finishTransferProgress(message,ok=true){
+  $('transferProgressBar').style.width=ok?'100%':$('transferProgressBar').style.width;
+  if(ok)$('transferPercent').textContent='100%';
+  $('transferStage').textContent=message;$('transferResult').textContent=message;
+  $('transferEta').textContent='Total time: '+formatTransferTime((Date.now()-transferStartedAt)/1000);
+  $('transferCloseBtn').disabled=false;
+}
+function formatTransferTime(seconds){
+  seconds=Math.max(0,Math.floor(seconds||0));const m=Math.floor(seconds/60),s=seconds%60;
+  return m?m+' min '+s+' sec':s+' sec';
+}
+$('transferCloseBtn').addEventListener('click',()=>{$('transferProgressModal').style.display='none';});
 
 async function googleGet(action,params={},timeoutMs=60000){
   const q=new URLSearchParams({action,...params,ts:String(Date.now())});
