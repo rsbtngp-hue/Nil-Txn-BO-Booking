@@ -367,7 +367,7 @@ async function load(){
       tx.onabort=()=>reject(tx.error||new Error('Local database read was interrupted.'));
     });
     if(saved){
-      master=saved.master||[];daily=saved.daily||[];dirtyDailyMonths=saved.dirtyDailyMonths||[];bookingRows=saved.bookingRows||[];bookingUploadAt=saved.bookingUploadAt||'';bookingDirty=!!saved.bookingDirty||localStorage.getItem('nilBoBookingDirty')==='1';
+      master=saved.master||[];daily=(saved.daily||[]).map(x=>({...x,transac_date:normalizeDate(x.transac_date)})).filter(x=>x.office_id&&x.transac_date);dirtyDailyMonths=saved.dirtyDailyMonths||[];bookingRows=(saved.bookingRows||[]).map(x=>({...x,booking_date:normalizeBookingDate(x.booking_date)}));bookingUploadAt=saved.bookingUploadAt||'';bookingDirty=!!saved.bookingDirty||localStorage.getItem('nilBoBookingDirty')==='1';
       updateMasterUploadUI();render();renderBooking();updateMisDateStatuses();
       status(`Local database loaded • Office Master: ${master.length.toLocaleString()} • Daily records: ${daily.length.toLocaleString()}`);
     }else status('Local database is ready; no saved records found yet.');
@@ -1205,7 +1205,7 @@ function refreshHierarchy(){
 }
 function setFilters(){
   refreshHierarchy();
-  const ds=daily.map(x=>x.transac_date).filter(Boolean).sort();
+  const ds=daily.map(x=>normalizeDate(x.transac_date)).filter(Boolean).sort();
   if(ds.length){ if(!$('to').value) $('to').value=ds[ds.length-1]; if(!$('from').value) $('from').value=$('to').value.slice(0,7)+'-01'; }
 }
 
@@ -1219,9 +1219,9 @@ function apply(){
   let map = new Map(master.map(x => [String(x.office_id), x]));
   let from = $('from').value, to =$('to').value;
   
-  view = daily.map(x => ({...x, ...(map.get(String(x.office_id)) || {})})).filter(x => !excludedOfficeIds.has(String(x.office_id)) && 
-    (!from || x.transac_date >= from) && 
-    (!to || x.transac_date <= to) && 
+  view = daily.map(x => ({...x, transac_date:normalizeDate(x.transac_date), ...(map.get(String(x.office_id)) || {})})).filter(x => !excludedOfficeIds.has(String(x.office_id)) && 
+    (!from || normalizeDate(x.transac_date) >= from) && 
+    (!to || normalizeDate(x.transac_date) <= to) && 
     ['division','subdivision','so','office'].every(id => !$(id).value || x[{division:'division_name', subdivision:'sub_division_name', so:'so_name', office:'office_name'}[id]] ===$(id).value)
   ); 
   
@@ -1242,7 +1242,7 @@ function buildReport(){
   
   // Only evaluate dates that actually exist in the imported dataset for the selected range.
   // This prevents future dates or globally missing upload dates from making every office fail continuity.
-  let expected = [...new Set(daily.map(x => x.transac_date).filter(d => d && d >= start && d <= end))].sort();
+  let expected = [...new Set(daily.map(x => normalizeDate(x.transac_date)).filter(d => d && d >= start && d <= end))].sort();
   if (!expected.length) {
     $('period').innerHTML = `<b>No dated records:</b> No imported daily records fall between ${esc(start)} and ${esc(end)}.`;
     $('cards').innerHTML = '';
@@ -1252,8 +1252,9 @@ function buildReport(){
   let byOffice = new Map();
   
   view.forEach(x => {
-    if(!byOffice.has(x.office_id)) byOffice.set(x.office_id, []);
-    byOffice.get(x.office_id).push(x);
+    const normalizedRow={...x,transac_date:normalizeDate(x.transac_date)};
+    if(!byOffice.has(normalizedRow.office_id)) byOffice.set(normalizedRow.office_id, []);
+    byOffice.get(normalizedRow.office_id).push(normalizedRow);
   });
   
   // Loosened status check in case CSV has varied capitalization
