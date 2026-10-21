@@ -100,7 +100,7 @@ function normalizeRows_(rows){
 
 function beginSync_(type,months){
   if(type==='daily_missing'){
-    const staging=getRequiredSheet_(DAILY_STAGING_SHEET),last=staging.getLastRow();
+    const staging=ensureDailyStaging_(),last=ensureDailyStaging_().getLastRow();
     if(last>1)staging.getRange(2,1,last-1,DAILY_HEADERS.length).clearContent();
     return{sheet:staging.getName(),clearedRows:Math.max(0,last-1),scope:'staged missing daily rows; live data preserved until merge'};
   }
@@ -133,7 +133,7 @@ function saveBatch_(type,rows){
   if(!rows.length)return{saved:0};
   if(rows.length>500)throw new Error('Batch too large. Send no more than 500 rows per request.');
   const isMaster=type==='master',isBooking=type==='booking',isDailyMissing=type==='daily_missing';
-  const sh=isBooking?getRequiredSheet_(BOOKING_STAGING_SHEET):(isDailyMissing?getRequiredSheet_(DAILY_STAGING_SHEET):getTargetSheet_(type));
+  const sh=isBooking?getRequiredSheet_(BOOKING_STAGING_SHEET):(isDailyMissing?ensureDailyStaging_():getTargetSheet_(type));
   const width=isMaster?MASTER_HEADERS.length:(isBooking?BOOKING_HEADERS.length:DAILY_HEADERS.length),now=new Date();
   const values=rows.map(r=>{
     r=r||{};
@@ -158,7 +158,7 @@ function saveBatch_(type,rows){
 function commitDailyMissing_(){
   const lock=LockService.getScriptLock();lock.waitLock(30000);
   try{
-    const live=getRequiredSheet_(DAILY_SHEET),stage=getRequiredSheet_(DAILY_STAGING_SHEET);
+    const live=getRequiredSheet_(DAILY_SHEET),stage=ensureDailyStaging_();
     const liveCount=Math.max(0,live.getLastRow()-1),stageCount=Math.max(0,stage.getLastRow()-1);
     const existing=new Set();
     if(liveCount){
@@ -272,6 +272,7 @@ function getTargetSheet_(type){
   if(!['master','daily','booking'].includes(type))throw new Error('Invalid type. Expected "master", "daily", or "booking".');
   return getRequiredSheet_(type==='master'?MASTER_SHEET:type==='daily'?DAILY_SHEET:BOOKING_SHEET);
 }
+function ensureDailyStaging_(){const sh=ensureSheet_(SpreadsheetApp.getActiveSpreadsheet(),DAILY_STAGING_SHEET,DAILY_HEADERS);try{sh.hideSheet();}catch(e){}return sh;}
 function getRequiredSheet_(name){const sh=SpreadsheetApp.getActiveSpreadsheet().getSheetByName(name);if(!sh)throw new Error('Sheet "'+name+'" not found. Run setupSheets() first.');return sh;}
 function ensureSheet_(ss,name,headers){
   let sh=ss.getSheetByName(name);if(!sh)sh=ss.insertSheet(name);
