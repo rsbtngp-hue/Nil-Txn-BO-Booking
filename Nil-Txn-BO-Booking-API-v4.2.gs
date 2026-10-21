@@ -29,7 +29,7 @@ function doGet(e){
     const p=(e&&e.parameter)||{}, action=p.action||'health'; let result;
     if(action==='health'){
       const ss=SpreadsheetApp.getActiveSpreadsheet();
-      result={ok:true,service:'Nil Transaction BO Detailed Report API',version:'4.2-incremental-exclusions',spreadsheetId:ss.getId(),spreadsheetName:ss.getName(),sheets:[MASTER_SHEET,DAILY_SHEET,BOOKING_SHEET,EXCLUSIONS_SHEET],timestamp:new Date().toISOString()};
+      result={ok:true,service:'Nil Transaction BO Detailed Report API',version:'4.3-safe-missing-daily-upload',spreadsheetId:ss.getId(),spreadsheetName:ss.getName(),sheets:[MASTER_SHEET,DAILY_SHEET,BOOKING_SHEET,EXCLUSIONS_SHEET],timestamp:new Date().toISOString()};
     }else if(action==='getMaster'||action==='downloadMaster'){
       result={ok:true,action:action,rows:readRowsAsObjects_(MASTER_SHEET,MASTER_HEADERS),count:Math.max(0,getRequiredSheet_(MASTER_SHEET).getLastRow()-1),timestamp:new Date().toISOString()};
     }else if(action==='getDaily'){
@@ -250,7 +250,7 @@ function getStatus_(){
   if(dailyRows){ds.getRange(2,3,dailyRows,1).getDisplayValues().forEach(r=>{const d=normalizeSheetDate_(r[0]);if(!d)return;const m=d.slice(0,7);monthCounts[m]=(monthCounts[m]||0)+1;if(d>latestTransactionDate)latestTransactionDate=d;});}
   if(bookingRows){bs.getRange(2,11,bookingRows,1).getDisplayValues().forEach(r=>{const d=normalizeSheetDate_(r[0]);if(d&&d>latestBookingDate)latestBookingDate=d;});}
   const props=PropertiesService.getScriptProperties();
-  return{ok:true,service:'Nil Transaction BO Detailed Report API',version:'4.2-incremental-exclusions',spreadsheetName:SpreadsheetApp.getActiveSpreadsheet().getName(),masterRows:masterRows,dailyRows:dailyRows,bookingRows:bookingRows,monthCounts:monthCounts,latestTransactionDate:latestTransactionDate,latestBookingDate:latestBookingDate,lastMasterWrite:props.getProperty('lastMasterWrite')||'',lastDailyWrite:props.getProperty('lastDailyWrite')||'',lastBookingWrite:props.getProperty('lastBookingWrite')||'',timestamp:new Date().toISOString()};
+  return{ok:true,service:'Nil Transaction BO Detailed Report API',version:'4.3-safe-missing-daily-upload',spreadsheetName:SpreadsheetApp.getActiveSpreadsheet().getName(),masterRows:masterRows,dailyRows:dailyRows,bookingRows:bookingRows,monthCounts:monthCounts,latestTransactionDate:latestTransactionDate,latestBookingDate:latestBookingDate,lastMasterWrite:props.getProperty('lastMasterWrite')||'',lastDailyWrite:props.getProperty('lastDailyWrite')||'',lastBookingWrite:props.getProperty('lastBookingWrite')||'',timestamp:new Date().toISOString()};
 }
 
 function readRowsAsObjects_(sheetName,headers){
