@@ -166,7 +166,7 @@ body[data-theme="violet"] .app-tab#tabNil{background:linear-gradient(125deg,#704
         <span id="excludedOfficeCount" class="note"></span>
       </div>
       <div id="officeExclusionList" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:7px;max-height:300px;overflow:auto;padding:8px;border:1px solid #f1d6a5;border-radius:8px;background:#fff"></div>
-      <div class="note">Tick an office to exclude it from Nil Transaction dashboard KPIs, division totals, and office-detail lists. Source data remains saved; this setting is stored in this browser and can be changed any time by an administrator.</div>
+      <div class="note">Tick an office to exclude it from Nil Transaction and BO Booking dashboard calculations. Exclusions are saved to the shared Google Sheets exclusion list so all users receive the same settings; local cache is used while offline.</div>
     </section>
     <div class="section-head"><h2>Office Master Management</h2><button id="addOfficeBtn" type="button">＋ Add Office</button><button id="exportMasterBtn" class="secondary" type="button">Export Master Excel</button></div>
     <div class="toolbar" style="margin-bottom:12px"><label class="field">Search Office Master<input id="masterSearch" type="search" placeholder="Office ID, name, SOL ID, division..."></label><span id="masterCount" class="note"></span></div>
@@ -382,70 +382,69 @@ async function fetchGoogleMaster(){
   throw lastErr||new Error('No Office Master download endpoint was available.');
 }
 async function fetchAllGoogleDailyPages(){
-  const pageSize=500;
-  let offset=0,totalCount=null;
-  const allRows=[];
+  const pageSize=500;let offset=0,totalCount=null;const allRows=[];
   while(totalCount===null||offset<totalCount){
     const payload=await googleGet('getDaily',{offset:String(offset),limit:String(pageSize)},60000);
-    if(!payload||payload.ok!==true||!Array.isArray(payload.rows)){
-      throw new Error('Invalid Daily Nil Transactions page response.');
-    }
-    if(totalCount===null){
-      totalCount=Number(payload.totalCount);
-      if(!Number.isFinite(totalCount)||totalCount<0){
-        throw new Error('Google Sheets did not return a valid total row count.');
-      }
-    }
-    if(payload.rows.length===0&&offset<totalCount){
-      throw new Error('Daily download stopped at row '+offset+' of '+totalCount+'. Existing local data was retained.');
-    }
-    allRows.push(...payload.rows);
-    offset+=payload.rows.length;
-    setSyncMessage('Downloading Daily Nil Transactions • '+allRows.length.toLocaleString()+' / '+totalCount.toLocaleString()+' rows');
+    if(!payload||payload.ok!==true||!Array.isArray(payload.rows))throw new Error('Invalid Daily Nil Transactions page response.');
+    if(totalCount===null){totalCount=Number(payload.totalCount);if(!Number.isFinite(totalCount)||totalCount<0)throw new Error('Google Sheets did not return a valid total row count.');}
+    if(payload.rows.length===0&&offset<totalCount)throw new Error('Daily download stopped at row '+offset+' of '+totalCount+'. Existing local data was retained.');
+    allRows.push(...payload.rows);offset+=payload.rows.length;
+    setSyncMessage('Initial Daily Nil Transactions download • '+allRows.length.toLocaleString()+' / '+totalCount.toLocaleString()+' rows');
   }
-  if(allRows.length!==totalCount){
-    throw new Error('Incomplete download: received '+allRows.length+' of '+totalCount+' rows.');
-  }
+  if(allRows.length!==totalCount)throw new Error('Incomplete download: received '+allRows.length+' of '+totalCount+' rows.');
   return allRows;
+}
+function readRemoteSyncCache(type){try{return JSON.parse(localStorage.getItem('nilBoRemoteMeta_'+type)||'null');}catch(e){return null;}}
+function saveRemoteSyncCache(type,meta){try{localStorage.setItem('nilBoRemoteMeta_'+type,JSON.stringify(meta));}catch(e){}}
+function remoteDatasetMeta(type,remote){
+  return type==='daily'?{rows:Number(remote.dailyRows||0),latest:String(remote.latestTransactionDate||''),write:String(remote.lastDailyWrite||'')}:
+    {rows:Number(remote.bookingRows||0),latest:String(remote.latestBookingDate||''),write:String(remote.lastBookingWrite||'')};
+}
+function sameRemoteMeta(a,b){return !!a&&!!b&&Number(a.rows)===Number(b.rows)&&String(a.latest||'')===String(b.latest||'')&&String(a.write||'')===String(b.write||'');}
+async function fetchBookingFull(){
+  const payload=await googleGet('getBooking',{},30000);if(payload&&payload.ok===false)throw new Error(payload.error||'Google rejected getBooking');
+  const rows=unwrapRows(payload);if(!rows)throw new Error('getBooking did not return a rows array for BO Booking Performance.');return rows;
+}
+async function fetchBookingSince(since){
+  const payload=await googleGet('getBookingSince',{since:String(since||'')},30000);
+  if(payload&&payload.ok===true&&Array.isArray(payload.rows))return payload.rows;
+  throw new Error('Incremental booking endpoint unavailable.');
+}
+async function fetchDailyDelta(since){
+  const payload=await googleGet('getDailySince',{since:String(since||'')},60000);
+  if(!payload||payload.ok!==true||!Array.isArray(payload.rows))throw new Error('Incremental Daily endpoint unavailable.');
+  return payload.rows;
 }
 async function fetchGoogleDataset(type){
   if(!navigator.onLine)throw new Error('Browser is offline.');
-  const action=type==='daily'?'getDaily':'getBooking';
-  const sheet=type==='daily'?'Daily Nil Transactions':'BO Booking Performance';
-  let rows;
+  const action=type==='daily'?'getDaily':'getBooking',sheet=type==='daily'?'Daily Nil Transactions':'BO Booking Performance';
+  const remote=await getGoogleStatus(),meta=remoteDatasetMeta(type,remote),cached=readRemoteSyncCache(type),marker=type==='daily'?'nilBoDailySynced':'nilBoBookingSynced';
+  if(sameRemoteMeta(meta,cached)&&localStorage.getItem(marker)==='1')return {type,count:0,localCount:type==='daily'?daily.length:bookingRows.length,sheet,action,skipped:true,reason:'Google metadata unchanged'};
+  let rows=[],mode='full';
   if(type==='daily'){
-    rows=await fetchAllGoogleDailyPages();
+    const localLatest=latestIsoDate(daily,'transac_date'),canDelta=!!(localLatest&&daily.length&&localStorage.getItem(marker)==='1'&&cached&&meta.rows>Number(cached.rows||0));
+    if(canDelta){try{rows=await fetchDailyDelta(localLatest);mode='incremental';}catch(e){rows=await fetchAllGoogleDailyPages();mode='full';}}else rows=await fetchAllGoogleDailyPages();
+    const dates=rows.map(r=>normalizeDate(val(r,'transac_date'))).filter(v=>/^\d{4}-\d{2}-\d{2}$/.test(v)).sort();googleDailyLatestDate=String(remote.latestTransactionDate||dates[dates.length-1]||'');
   }else{
-    const payload=await googleGet(action,{},30000);
-    if(payload&&payload.ok===false)throw new Error(payload.error||('Google rejected '+action));
-    rows=unwrapRows(payload);
-    if(!rows)throw new Error(action+' did not return a rows array for '+sheet+'.');
+    const localLatest=latestIsoDate(bookingRows,'booking_date'),canDelta=!!(localLatest&&bookingRows.length&&localStorage.getItem(marker)==='1'&&cached&&meta.rows>Number(cached.rows||0));
+    rows=canDelta?await fetchBookingSince(localLatest):await fetchBookingFull();mode=canDelta?'incremental':'full';
   }
-  if(type==='daily'){
-    const sheetDates=rows.map(r=>normalizeDate(val(r,'transac_date'))).filter(v=>/^\d{4}-\d{2}-\d{2}$/.test(v)).sort();
-    if(sheetDates.length)googleDailyLatestDate=sheetDates[sheetDates.length-1];
-  }
-  const matching=rows.filter(r=>type==='daily'
-    ? !!String(val(r,'office_id')||'').trim() && !!normalizeDate(val(r,'transac_date'))
-    : !!normalizeBookingOfficeId(bookingVal(r,'office_id')));
+  const matching=rows.filter(r=>type==='daily'?!!String(val(r,'office_id')||'').trim()&&!!normalizeDate(val(r,'transac_date')):!!normalizeBookingOfficeId(bookingVal(r,'office_id')));
   if(rows.length&&!matching.length)throw new Error('No valid records returned for '+sheet+'. Check the sheet headers.');
   if(type==='daily'){
-    const pulled=matching.map(canonDaily).filter(r=>r.office_id&&r.transac_date);
-    const dirty=new Set(dirtyDailyMonths);
-    const merged=[...pulled.filter(r=>!dirty.has(String(r.transac_date||'').slice(0,7))),...daily.filter(r=>dirty.has(String(r.transac_date||'').slice(0,7)))];
-    daily=[...new Map(merged.map(r=>[r.office_id+'|'+r.transac_date,r])).values()];
-    await save();localStorage.setItem('nilBoDailySynced','1');
-    return {type,count:pulled.length,localCount:daily.length,sheet,action};
+    const pulled=matching.map(canonDaily).filter(r=>r.office_id&&r.transac_date),dirty=new Set(dirtyDailyMonths),keys=new Set(pulled.map(r=>r.office_id+'|'+r.transac_date));
+    const merged=[...daily.filter(r=>dirty.has(String(r.transac_date||'').slice(0,7))),...daily.filter(r=>!dirty.has(String(r.transac_date||'').slice(0,7))&&!keys.has(r.office_id+'|'+r.transac_date)),...pulled.filter(r=>!dirty.has(String(r.transac_date||'').slice(0,7)))];
+    daily=[...new Map(merged.map(r=>[r.office_id+'|'+r.transac_date,r])).values()];await save();localStorage.setItem(marker,'1');saveRemoteSyncCache(type,meta);
+    return {type,count:pulled.length,localCount:daily.length,sheet,action,mode,skipped:false};
   }
   const parsed=parseBookingCsv(matching);
   if(matching.length&&!parsed.rows.length)throw new Error('Booking rows returned but none matched Office Master BPO IDs; existing local data retained.');
-  if(!bookingDirty){
-    bookingRows=parsed.rows;bookingUploadAt='Downloaded from Google Sheets';
-    await save();localStorage.setItem('nilBoBookingSynced','1');renderBooking();
-  }
-  return {type,count:parsed.rows.length,localCount:bookingRows.length,sheet,action,localPending:bookingDirty};
+  if(!bookingDirty){if(mode==='incremental'){const updates=new Map(parsed.rows.map(r=>[String(r.office_id),r]));bookingRows=[...bookingRows.filter(r=>!updates.has(String(r.office_id))),...parsed.rows];}else bookingRows=parsed.rows;
+    bookingUploadAt='Downloaded from Google Sheets';await save();localStorage.setItem(marker,'1');saveRemoteSyncCache(type,meta);renderBooking();}
+  return {type,count:parsed.rows.length,localCount:bookingRows.length,sheet,action,mode,skipped:false};
 }
 async function downloadGoogleDailyAndBooking(){
+  await loadSharedOfficeExclusions();
   const results=[],errors=[];
   for(const type of ['daily','booking']){
     setSyncMessage('Checking Google Sheets • '+(type==='daily'?'Daily Nil Transactions':'BO Booking Performance')+'…');
@@ -616,10 +615,30 @@ function updateMasterUploadUI(){
   $('masterUploadWrap').classList.toggle('hide', hasMaster);
   $('replaceMasterBtn').classList.toggle('hide', !hasMaster);
 }
-function saveOfficeExclusions(){
+let exclusionSaveChain=Promise.resolve();
+async function saveOfficeExclusions(){
   try{localStorage.setItem('nilBoExcludedOfficeIds',JSON.stringify([...excludedOfficeIds]));}catch(e){}
-  renderOfficeExclusionList();
-  render();
+  renderOfficeExclusionList();render();
+  if(!adminLoggedIn||!navigator.onLine)return;
+  const snapshot=[...excludedOfficeIds];
+  exclusionSaveChain=exclusionSaveChain.then(async()=>{
+    setSyncMessage('Saving shared office exclusions to Google Sheets…');
+    await fetch(APPS_SCRIPT_URL,{method:'POST',mode:'no-cors',headers:{'Content-Type':'text/plain;charset=utf-8'},body:JSON.stringify({action:'saveExclusions',excludedOfficeIds:snapshot})});
+    const check=await googleGet('getExclusions',{},20000);
+    if(!check||check.ok!==true||!Array.isArray(check.excludedOfficeIds))throw new Error('Google Sheets did not confirm the shared exclusion list.');
+    excludedOfficeIds=new Set(check.excludedOfficeIds.map(x=>String(x)));
+    try{localStorage.setItem('nilBoExcludedOfficeIds',JSON.stringify([...excludedOfficeIds]));}catch(e){}
+    renderOfficeExclusionList();render();setSyncMessage('Shared office exclusions saved to Google Sheets.','ok');
+  }).catch(err=>setSyncMessage('Shared exclusion save failed: '+(err.message||err)+'. Local selection is retained on this browser.','error'));
+  return exclusionSaveChain;
+}
+async function loadSharedOfficeExclusions(){
+  if(!navigator.onLine)return;
+  try{const p=await googleGet('getExclusions',{},15000);if(p&&p.ok===true&&Array.isArray(p.excludedOfficeIds)){
+    excludedOfficeIds=new Set(p.excludedOfficeIds.map(x=>String(x)));
+    try{localStorage.setItem('nilBoExcludedOfficeIds',JSON.stringify([...excludedOfficeIds]));}catch(e){}
+    renderOfficeExclusionList();render();
+  }}catch(e){}
 }
 function renderOfficeExclusionList(){
   const host=$('officeExclusionList');if(!host)return;
