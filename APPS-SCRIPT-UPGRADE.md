@@ -1,53 +1,46 @@
-# Apps Script upgrade for incremental sync and shared office exclusions
+# Apps Script upgrade — v4.2
 
-The dashboard HTML now checks remote dataset metadata first. When metadata is unchanged, it skips the download. When rows have been appended, it requests only records whose date is on/after the locally cached latest date. If the remote row count did not increase (for example, a month was replaced), the HTML intentionally performs a full refresh to avoid retaining stale historical rows.
+The repository now contains a complete, integrated Apps Script file. Use that file rather than manually merging the older add-on snippets.
 
-## 1. Add the helper file
+## 1. Replace the existing Apps Script code
 
-In the same Google Apps Script project used by the dashboard's current `APPS_SCRIPT_URL`, create a new script file named `IncrementalSyncAndExclusions.gs` and paste the contents of this repository's `IncrementalSyncAndExclusions.gs`.
+Open the Google Apps Script project currently used by the dashboard's `APPS_SCRIPT_URL`.
 
-## 2. Add three GET routes in the existing doGet(e)
+1. Open the existing main script file (usually `Code.gs`).
+2. Copy the complete contents of [`Nil-Txn-BO-Booking-API-v4.2.gs`](https://github.com/rsbtngp-hue/Nil-Txn-BO-Booking/blob/main/Nil-Txn-BO-Booking-API-v4.2.gs).
+3. Replace the old main script's contents with this complete code and save. Do not leave the old `doGet`, `doPost`, or helper functions in another active script file, or Apps Script will report duplicate function/constant declarations.
+4. The code preserves the existing sheet names and upload actions. It does not clear your existing sheet data merely by being saved or deployed.
 
-Inside the existing `doGet(e)`, add these branches before the final unsupported-action `else`:
+## 2. Deploy a new version
 
-```javascript
-} else if (action === 'getDailySince') {
-  result = getDailySince_(params.since);
-} else if (action === 'getBookingSince') {
-  result = getBookingSince_(params.since);
-} else if (action === 'getExclusions') {
-  result = getExclusions_();
-}
-```
+1. In Apps Script choose **Deploy → Manage deployments**.
+2. Edit the current web-app deployment.
+3. Choose **New version**, then deploy.
+4. Keep the same existing `/exec` URL in the dashboard HTML if you edited the existing deployment.
 
-Keep the existing actions and their current branches unchanged.
+## 3. What v4.2 adds
 
-## 3. Add one POST route in the existing doPost(e)
+- `GET ?action=getDailySince&since=YYYY-MM-DD`: returns Daily Nil Transactions from the requested date onward.
+- `GET ?action=getBookingSince&since=YYYY-MM-DD`: returns booking rows from the requested booking date onward.
+- `GET ?action=getExclusions`: returns the shared excluded office IDs.
+- `POST {"action":"saveExclusions","excludedOfficeIds":["..."]}`: updates the shared exclusion list.
+- A dedicated `Dashboard Office Exclusions` sheet is created automatically on first use; its columns are `office_id, office_name, excluded, updated_at`.
+- Existing `health`, `getMaster`, `getDaily`, `getBooking`, `status`, `beginSync`, `saveBatch`, and `commitBooking` actions remain available.
 
-Add this branch to the existing action chain:
+## 4. Verify after deployment
 
-```javascript
-else if (request.action === 'saveExclusions') result = saveExclusions_(request.excludedOfficeIds);
-```
+Open these using the current deployed `/exec` URL:
 
-For example, place it after the existing `commitBooking` branch and before the unsupported-action error.
+- `?action=health` — should report version `4.2-incremental-exclusions`.
+- `?action=getDailySince&since=2026-10-15`
+- `?action=getBookingSince&since=2026-10-15`
+- `?action=getExclusions`
 
-## 4. Deploy
+The exclusions sheet is created when `getExclusions` is first called. Test by excluding one office, then open the dashboard in another browser and confirm that the exclusion appears there too.
 
-1. Save the Apps Script project.
-2. Choose **Deploy → Manage deployments**.
-3. Edit the existing web-app deployment, select **New version**, and deploy it. Keep the existing /exec URL if you edited that deployment.
-4. Run the dashboard once as an administrator while online. The new `Dashboard Office Exclusions` sheet is created automatically when the endpoint is first used.
-5. Verify these URLs in a browser (append the query string to your existing /exec URL):
-   - `?action=getDailySince&since=2026-10-15`
-   - `?action=getBookingSince&since=2026-10-15`
-   - `?action=getExclusions`
+## Important limitations
 
-The shared exclusion sheet stores only excluded offices; unchecking an office removes it from the shared list. The HTML retains a local cache for offline viewing, but the shared Google Sheet is the online source of truth.
-
-## Notes
-
-- A first visit on a browser with no local database must download the full datasets once. Later visits use the local IndexedDB first and skip downloads when remote metadata has not changed.
-- If the latest row count increases, only rows from the local latest date onward are transferred; the latest date is included to capture additional records for that same day. Records are merged by `office_id + transac_date`.
-- If a dataset's row count falls or remains unchanged while its write metadata changes, the client falls back to a full refresh so replaced/deleted historical data is not left stale.
-- Office exclusions are applied through the same `excludedOfficeIds` set already used by both Nil and Booking dashboard calculations.
+- A browser with no local IndexedDB data must download the full dataset once.
+- Incremental transfer requests rows on or after the local latest date, so additions for the same date are included. Client-side merging must use the dashboard's stable row keys to avoid duplicates.
+- The date-based endpoint scans the sheet's date column to locate matching rows, but transfers only matching rows to the browser. This reduces JSON transfer substantially; it does not eliminate the Apps Script work of scanning dates.
+- The script cannot be deployed to your Google account by a GitHub commit. You must paste/save and deploy it in Apps Script as described above.
