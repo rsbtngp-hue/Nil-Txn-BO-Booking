@@ -266,7 +266,8 @@ function repairBookingSheetColumns_(sh,headers,actualHeaders){
   const sourceIndex={};
   actualHeaders.forEach((h,i)=>{
     const n=normalize(h),key=aliases[n]||canonicalByNorm[n];
-    if(key && sourceIndex[key]===undefined)sourceIndex[key]=i;
+    const canonicalHeader=BOOKING_KEYS.includes(key)?headers[BOOKING_KEYS.indexOf(key)]:key;
+    if(canonicalHeader && sourceIndex[canonicalHeader]===undefined)sourceIndex[canonicalHeader]=i;
   });
   const values=lastRow>1?sh.getRange(2,1,lastRow-1,lastCol).getValues():[];
   const mapped=values.map(row=>headers.map(h=>sourceIndex[h]===undefined?'':row[sourceIndex[h]]));
