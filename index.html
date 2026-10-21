@@ -465,6 +465,14 @@ async function fetchGoogleDataset(type){
   const dateField=isDaily?'transac_date':'booking_date';
   const localLatest=latestDatasetDate(localRows,dateField,normalizeFn);
   const remoteLatest=normalizeFn(isDaily?remote.latestTransactionDate:remote.latestBookingDate);
+  const reconcileMonthStart=isDaily?((remoteLatest||localLatest||'').slice(0,7)+'-01'):'';
+  let reconciledMonthMeta=null;
+  if(isDaily){try{reconciledMonthMeta=JSON.parse(localStorage.getItem('nilBoDailyMonthReconciled')||'null');}catch(e){reconciledMonthMeta=null;}}
+  const currentMonthWasReconciled=!isDaily||!!(reconciledMonthMeta&&
+    reconciledMonthMeta.monthStart===reconcileMonthStart&&
+    Number(reconciledMonthMeta.rows)===Number(meta.rows)&&
+    String(reconciledMonthMeta.latest||'')===String(meta.latest||'')&&
+    String(reconciledMonthMeta.write||'')===String(meta.write||''));
   const hasLocalRows=Array.isArray(localRows)&&localRows.length>0;
   const hasLocal=hasLocalRows&&!!localLatest;
 
@@ -477,7 +485,7 @@ async function fetchGoogleDataset(type){
     throw new Error(sheet+' has '+localRows.length.toLocaleString()+' local rows, but their latest date could not be read. Full download was blocked to protect the local cache. Local date fields detected: '+Object.keys(localRows[0]||{}).join(', '));
   }
 
-  if(hasLocal&&sameRemoteMeta(meta,cached)&&localStorage.getItem(marker)==='1'&&(!remoteLatest||remoteLatest===localLatest)){
+  if(hasLocal&&sameRemoteMeta(meta,cached)&&localStorage.getItem(marker)==='1'&&(!remoteLatest||remoteLatest===localLatest)&&currentMonthWasReconciled){
     return {type,count:0,localCount:localRows.length,sheet,action,mode:'unchanged',skipped:true,reason:'Google metadata unchanged',since:localLatest};
   }
 
@@ -487,8 +495,7 @@ async function fetchGoogleDataset(type){
     // changed. This keeps the 187k historical rows local but ensures edits/new rows from
     // the 1st through the latest uploaded date are included in calculations.
     // Booking continues incrementally from its latest local booking date.
-    const currentMonthStart=(remoteLatest||localLatest).slice(0,7)+'-01';
-    since=isDaily?(localLatest<currentMonthStart?localLatest:currentMonthStart):localLatest;
+    since=isDaily?(localLatest<reconcileMonthStart?localLatest:reconcileMonthStart):localLatest;
     const remoteIsBehind=!!(remoteLatest&&remoteLatest<localLatest);
     setSyncMessage('Local '+sheet+' cache has '+localRows.length.toLocaleString()+' rows. Checking Google incrementally from '+since+'; historical records before this date remain local…');
     rows=isDaily?await fetchDailyDelta(since):await fetchBookingSince(since);
@@ -511,6 +518,7 @@ async function fetchGoogleDataset(type){
     const merged=[...preservedLocal,...pulled.filter(r=>!dirty.has(String(r.transac_date||'').slice(0,7)))];
     daily=[...new Map(merged.map(r=>[r.office_id+'|'+r.transac_date,r])).values()];
     await save();localStorage.setItem(marker,'1');saveRemoteSyncCache(type,meta);
+    localStorage.setItem('nilBoDailyMonthReconciled',JSON.stringify({monthStart:reconcileMonthStart,rows:meta.rows,latest:meta.latest,write:meta.write}));
     return {type,count:pulled.length,localCount:daily.length,sheet,action,mode,skipped:false,since};
   }
   const parsed=parseBookingCsv(matching);
