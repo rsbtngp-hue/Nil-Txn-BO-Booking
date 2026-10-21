@@ -198,10 +198,11 @@ function saveExclusions_(ids){
 function getStatus_(){
   const ms=getRequiredSheet_(MASTER_SHEET),ds=getRequiredSheet_(DAILY_SHEET),bs=getRequiredSheet_(BOOKING_SHEET);
   const masterRows=Math.max(0,ms.getLastRow()-1),dailyRows=Math.max(0,ds.getLastRow()-1),bookingRows=Math.max(0,bs.getLastRow()-1);
-  const monthCounts={};let latestTransactionDate='';
+  const monthCounts={};let latestTransactionDate='',latestBookingDate='';
   if(dailyRows){ds.getRange(2,3,dailyRows,1).getDisplayValues().forEach(r=>{const d=normalizeSheetDate_(r[0]);if(!d)return;const m=d.slice(0,7);monthCounts[m]=(monthCounts[m]||0)+1;if(d>latestTransactionDate)latestTransactionDate=d;});}
+  if(bookingRows){bs.getRange(2,11,bookingRows,1).getDisplayValues().forEach(r=>{const d=normalizeSheetDate_(r[0]);if(d&&d>latestBookingDate)latestBookingDate=d;});}
   const props=PropertiesService.getScriptProperties();
-  return{ok:true,service:'Nil Transaction BO Detailed Report API',version:'4.2-incremental-exclusions',spreadsheetName:SpreadsheetApp.getActiveSpreadsheet().getName(),masterRows:masterRows,dailyRows:dailyRows,bookingRows:bookingRows,monthCounts:monthCounts,latestTransactionDate:latestTransactionDate,lastMasterWrite:props.getProperty('lastMasterWrite')||'',lastDailyWrite:props.getProperty('lastDailyWrite')||'',lastBookingWrite:props.getProperty('lastBookingWrite')||'',timestamp:new Date().toISOString()};
+  return{ok:true,service:'Nil Transaction BO Detailed Report API',version:'4.2-incremental-exclusions',spreadsheetName:SpreadsheetApp.getActiveSpreadsheet().getName(),masterRows:masterRows,dailyRows:dailyRows,bookingRows:bookingRows,monthCounts:monthCounts,latestTransactionDate:latestTransactionDate,latestBookingDate:latestBookingDate,lastMasterWrite:props.getProperty('lastMasterWrite')||'',lastDailyWrite:props.getProperty('lastDailyWrite')||'',lastBookingWrite:props.getProperty('lastBookingWrite')||'',timestamp:new Date().toISOString()};
 }
 
 function readRowsAsObjects_(sheetName,headers){
