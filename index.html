@@ -1561,7 +1561,7 @@ function gasCall(action,type,rows=[],months=[]){
   if(window.google && google.script && google.script.run){
     return new Promise((resolve,reject)=>{
       const runner=google.script.run.withSuccessHandler(resolve).withFailureHandler(reject);
-      if(action==='beginSync') runner.beginSync(type,months); else if(action==='saveBatch') runner.saveBatch(type,rows); else runner.commitBooking();
+      if(action==='beginSync') runner.beginSync(type,months); else if(action==='saveBatch') runner.saveBatch(type,rows); else if(action==='commitDailyMissing') runner.commitDailyMissing(); else runner.commitBooking();
     });
   }
   // Apps Script writes use text/plain to avoid a CORS preflight. Since the browser
