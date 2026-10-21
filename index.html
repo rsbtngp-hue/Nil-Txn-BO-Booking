@@ -253,7 +253,7 @@ const APPS_SCRIPT_URL='https://script.google.com/macros/s/AKfycbxV6bArHWZor5PbIe
 const categories=[['cbs_nil_offices','CBS'],['pli_nil_offices','PLI'],['mail_nil_offices','Mail'],['mo_nil_offices','MO'],['stamp_nil_offices','Stamp'],['ippb_nil_offices','IPPB']];
 let master=[], daily=[], bookingRows=[], bookingUploadAt='', view=[], detailRows=[], detailTitle='Nil office details', dirtyDailyMonths=[];
 let googleDailyLatestDate='', googleBookingLatestDate='';
-let bookingDateRangeTouched=false;
+let bookingDateRangeTouched=false, nilDateRangeTouched=false;
 let localDbReady=false, syncInProgress=false;
 let adminLoggedIn=false, editingOfficeIndex=-1, bookingDirty=false;
 let excludedOfficeIds=new Set();
@@ -288,6 +288,16 @@ function latestDatasetDate(rows,field,normalizeFn){
   });
   return latest;
 }
+function applyNilDefaultDateRange(latestValue=''){
+  if(nilDateRangeTouched)return false;
+  const latest=normalizeDate(latestValue)||googleDailyLatestDate||latestDatasetDate(daily,'transac_date',normalizeDate);
+  if(!/^\d{4}-\d{2}-\d{2}$/.test(String(latest||'')))return false;
+  const from=latest.slice(0,7)+'-01',to=latest;
+  let changed=false;
+  if($('from').value!==from){$('from').value=from;changed=true;}
+  if($('to').value!==to){$('to').value=to;changed=true;}
+  return changed;
+}
 function displayMisDate(value){if(value===undefined||value===null||String(value).trim()==='')return 'Date not available';const raw=String(value).trim();const m=raw.match(/^(\d{4})-(\d{2})-(\d{2})(?:$|T|\s)/);if(m)return m[3]+'-'+m[2]+'-'+m[1];const iso=normalizeDate(value);const n=String(iso||'').match(/^(\d{4})-(\d{2})-(\d{2})$/);return n?n[3]+'-'+n[2]+'-'+n[1]:raw;}
 function updateMisDateStatuses(remoteStatus=null){
   const dailyLocal=latestIsoDate(daily,'transac_date');
@@ -296,7 +306,9 @@ function updateMisDateStatuses(remoteStatus=null){
   const remoteBooking=remoteStatus&&(remoteStatus.latestBookingDate||remoteStatus.latest_booking_date||remoteStatus.bookingLatestDate||remoteStatus.latestBookingTransactionDate);
   // Prefer the maximum transac_date read directly from the Google "Daily Nil Transactions"
   // sheet; the status endpoint may not expose a date field.
-  const dailyDate=googleDailyLatestDate||normalizeDate(remoteDaily)||dailyLocal;
+  const normalizedDailyRemote=normalizeDate(remoteDaily);
+  if(normalizedDailyRemote)googleDailyLatestDate=normalizedDailyRemote;
+  const dailyDate=normalizedDailyRemote||googleDailyLatestDate||dailyLocal;
   const normalizedRemoteBooking=normalizeBookingDate(remoteBooking);
   if(normalizedRemoteBooking)googleBookingLatestDate=normalizedRemoteBooking;
   else if(!googleBookingLatestDate&&bookingLocal)googleBookingLatestDate=bookingLocal;
@@ -471,14 +483,16 @@ async function fetchGoogleDataset(type){
 
   let rows=[],mode=hasLocal?'incremental':'initial',since='';
   if(hasLocal){
-    // Inclusive cutoff refreshes the latest local day for late arrivals and all later records.
-    // Even if Google reports an older latest date, do not redownload historical data.
-    since=localLatest;
+    // For Daily Nil, re-read only the affected current-month window when Google metadata
+    // changed. This keeps the 187k historical rows local but ensures edits/new rows from
+    // the 1st through the latest uploaded date are included in calculations.
+    // Booking continues incrementally from its latest local booking date.
+    const currentMonthStart=(remoteLatest||localLatest).slice(0,7)+'-01';
+    since=isDaily?(localLatest<currentMonthStart?localLatest:currentMonthStart):localLatest;
     const remoteIsBehind=!!(remoteLatest&&remoteLatest<localLatest);
-    setSyncMessage(remoteIsBehind
-      ?'Local '+sheet+' cache has '+localRows.length.toLocaleString()+' rows. Google latest date is older than local data; checking from local date '+since+' without redownloading history…'
-      :'Local '+sheet+' cache has '+localRows.length.toLocaleString()+' rows. Checking Google for new/updated records from '+since+'…');
+    setSyncMessage('Local '+sheet+' cache has '+localRows.length.toLocaleString()+' rows. Checking Google incrementally from '+since+'; historical records before this date remain local…');
     rows=isDaily?await fetchDailyDelta(since):await fetchBookingSince(since);
+    mode='incremental';
   }else{
     // Only a genuinely empty local cache can begin a full historical download.
     setSyncMessage('No local '+sheet+' records found. Creating the initial local cache…');
@@ -488,12 +502,13 @@ async function fetchGoogleDataset(type){
   if(rows.length&&!matching.length)throw new Error('No valid records returned for '+sheet+'. Check the sheet headers.');
   if(isDaily){
     const pulled=matching.map(canonDaily).filter(r=>r.office_id&&r.transac_date);
-    const dirty=new Set(dirtyDailyMonths),keys=new Set(pulled.map(r=>r.office_id+'|'+r.transac_date));
-    const merged=[
-      ...daily.filter(r=>dirty.has(String(r.transac_date||'').slice(0,7))),
-      ...daily.filter(r=>!dirty.has(String(r.transac_date||'').slice(0,7))&&!keys.has(r.office_id+'|'+r.transac_date)),
-      ...pulled.filter(r=>!dirty.has(String(r.transac_date||'').slice(0,7)))
-    ];
+    const dirty=new Set(dirtyDailyMonths);
+    const cutoff=since;
+    const preservedLocal=daily.filter(r=>{
+      const d=normalizeDate(r.transac_date),month=String(d||'').slice(0,7);
+      return dirty.has(month)||!cutoff||d<cutoff;
+    });
+    const merged=[...preservedLocal,...pulled.filter(r=>!dirty.has(String(r.transac_date||'').slice(0,7)))];
     daily=[...new Map(merged.map(r=>[r.office_id+'|'+r.transac_date,r])).values()];
     await save();localStorage.setItem(marker,'1');saveRemoteSyncCache(type,meta);
     return {type,count:pulled.length,localCount:daily.length,sheet,action,mode,skipped:false,since};
@@ -528,8 +543,8 @@ async function downloadGoogleDailyAndBooking(){
   }
   // Always move the Nil dashboard's default "Date to" to the newest date available
   // after a successful Daily Nil Transactions download, then recalculate all KPIs/tables.
-  const latestDailyDate=latestIsoDate(daily,'transac_date');
-  if(latestDailyDate){$('to').value=latestDailyDate;if(!$('from').value)$('from').value=latestDailyDate.slice(0,7)+'-01';}
+  const latestDailyDate=googleDailyLatestDate||latestIsoDate(daily,'transac_date');
+  applyNilDefaultDateRange(latestDailyDate);
   render();renderBooking();
   updateMisDateStatuses();
   // The lightweight status action can report the latest sheet date even when a large
@@ -1490,8 +1505,8 @@ async function sync(){
       try{remoteStatus=await getGoogleStatus();msg+=' Remote counts — Office Master '+Number(remoteStatus.masterRows||0).toLocaleString()+', Daily '+Number(remoteStatus.dailyRows||0).toLocaleString()+', Booking '+Number(remoteStatus.bookingRows||0).toLocaleString()+'.';}
       catch(e){issues.push('Remote status verification: '+(e.message||e));}
       if(issues.length)msg+=' Issues: '+issues.join(' | ');
-      const latestDailyDate=latestIsoDate(daily,'transac_date');
-      if(latestDailyDate){$('to').value=latestDailyDate;if(!$('from').value)$('from').value=latestDailyDate.slice(0,7)+'-01';}
+      const latestDailyDate=googleDailyLatestDate||normalizeDate(remoteStatus&&remoteStatus.latestTransactionDate)||latestIsoDate(daily,'transac_date');
+      applyNilDefaultDateRange(latestDailyDate);
       render();renderBooking();updateMisDateStatuses(remoteStatus);
       status(msg);markSyncTime();setSyncMessage(msg,issues.length?'error':'ok');return;
     }
@@ -1513,8 +1528,8 @@ async function sync(){
     if(masterNeedsSync){localStorage.setItem('nilBoMasterSynced','1');localStorage.removeItem('nilBoMasterDirty');}
     if(months.length){dirtyDailyMonths=dirtyDailyMonths.filter(m=>!months.includes(m));localStorage.setItem('nilBoDailySynced','1');}
     await save();markSyncTime();
-    const latestDailyDate=latestIsoDate(daily,'transac_date');
-    if(latestDailyDate){$('to').value=latestDailyDate;if(!$('from').value)$('from').value=latestDailyDate.slice(0,7)+'-01';}
+    const latestDailyDate=googleDailyLatestDate||normalizeDate(st&&st.latestTransactionDate)||latestIsoDate(daily,'transac_date');
+    applyNilDefaultDateRange(latestDailyDate);
     render();renderBooking();updateMisDateStatuses(st||null);
     let msg='Google upload verified ('+sent.toLocaleString()+' rows submitted). Daily Nil Transactions downloaded '+daily.length.toLocaleString()+' local rows; BO Booking Performance '+bookingRows.length.toLocaleString()+' local offices.';
     if(issues.length)msg+=' Download issues: '+issues.join(' | ');
@@ -1529,11 +1544,12 @@ $('division').onchange=()=>{ $('subdivision').value='';$('so').value='';$('offic
 $('subdivision').onchange=()=>{ $('so').value='';$('office').value='';refreshHierarchy();apply(); };
 $('so').onchange=()=>{ $('office').value='';refreshHierarchy();apply(); };
 $('office').onchange=apply;
-$('from').onchange=apply;
-$('to').onchange=apply;
+$('from').onchange=()=>{nilDateRangeTouched=true;apply();};
+$('to').onchange=()=>{nilDateRangeTouched=true;apply();};
 $('reset').onclick = () => {
   ['division','subdivision','so','office'].forEach(id => $(id).value = '');
-  $('from').value = ''; $('to').value = '';
+  nilDateRangeTouched=false;
+  applyNilDefaultDateRange(googleDailyLatestDate||latestIsoDate(daily,'transac_date'));
   refreshHierarchy(); render();
 };
 $('clearBtn').onclick = async () => {
