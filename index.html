@@ -219,6 +219,8 @@ body[data-theme="violet"] .app-tab#tabNil{background:linear-gradient(125deg,#704
     </section>
     <section class="panel">
       <div class="filters">
+        <label class="field">Date from<input id="bookingFrom" type="date"></label>
+        <label class="field">Date to<input id="bookingTo" type="date"></label>
         <label class="field">Division<select id="bookingDivision"><option value="">All Divisions</option></select></label>
         <label class="field">Sub Division<select id="bookingSubdivision"><option value="">All Sub Divisions</option></select></label>
         <label class="field">SO Name<select id="bookingSo"><option value="">All SOs</option></select></label>
@@ -250,7 +252,8 @@ const APPS_SCRIPT_URL='https://script.google.com/macros/s/AKfycbxV6bArHWZor5PbIe
 
 const categories=[['cbs_nil_offices','CBS'],['pli_nil_offices','PLI'],['mail_nil_offices','Mail'],['mo_nil_offices','MO'],['stamp_nil_offices','Stamp'],['ippb_nil_offices','IPPB']];
 let master=[], daily=[], bookingRows=[], bookingUploadAt='', view=[], detailRows=[], detailTitle='Nil office details', dirtyDailyMonths=[];
-let googleDailyLatestDate='';
+let googleDailyLatestDate='', googleBookingLatestDate='';
+let bookingDateRangeTouched=false;
 let adminLoggedIn=false, editingOfficeIndex=-1, bookingDirty=false;
 let excludedOfficeIds=new Set();
 try{excludedOfficeIds=new Set(JSON.parse(localStorage.getItem('nilBoExcludedOfficeIds')||'[]').map(x=>String(x)));}catch(e){excludedOfficeIds=new Set();}
@@ -277,10 +280,15 @@ function updateMisDateStatuses(remoteStatus=null){
   // Prefer the maximum transac_date read directly from the Google "Daily Nil Transactions"
   // sheet; the status endpoint may not expose a date field.
   const dailyDate=googleDailyLatestDate||normalizeDate(remoteDaily)||dailyLocal;
-  const bookingDate=normalizeBookingDate(remoteBooking)||bookingLocal;
+  const normalizedRemoteBooking=normalizeBookingDate(remoteBooking);
+  if(normalizedRemoteBooking)googleBookingLatestDate=normalizedRemoteBooking;
+  else if(!googleBookingLatestDate&&bookingLocal)googleBookingLatestDate=bookingLocal;
+  const bookingDate=googleBookingLatestDate||bookingLocal;
+  const bookingRangeChanged=applyBookingDateDefaults(bookingDate);
   const d=$('dailyMisUpdated'),b=$('bookingMisUpdated');
   if(d)d.textContent='Nil Transaction BO — MIS Data updated up to: '+displayMisDate(dailyDate)+(googleDailyLatestDate||remoteDaily?' • Google Sheets':' • Local saved data');
-  if(b)b.textContent='BO Booking Performance — MIS Data updated up to: '+displayMisDate(bookingDate)+(remoteBooking?' • Google Sheets':' • Local saved data');
+  if(b)b.textContent='BO Booking Performance — MIS Data updated up to: '+displayMisDate(bookingDate)+(normalizedRemoteBooking?' • Google Sheets':' • Local saved data');
+  if(bookingRangeChanged&&$('bookingTable'))renderBooking();
 }
 window.addEventListener('online',updateNetworkStatus);window.addEventListener('offline',updateNetworkStatus);
 
@@ -439,7 +447,7 @@ async function fetchGoogleDataset(type){
   }
   const parsed=parseBookingCsv(matching);
   if(matching.length&&!parsed.rows.length)throw new Error('Booking rows returned but none matched Office Master BPO IDs; existing local data retained.');
-  if(!bookingDirty){if(mode==='incremental'){const updates=new Map(parsed.rows.map(r=>[String(r.office_id),r]));bookingRows=[...bookingRows.filter(r=>!updates.has(String(r.office_id))),...parsed.rows];}else bookingRows=parsed.rows;
+  if(!bookingDirty){if(mode==='incremental'){const rowKey=r=>String(r.office_id)+'|'+normalizeBookingDate(r.booking_date);const updates=new Map(parsed.rows.map(r=>[rowKey(r),r]));bookingRows=[...bookingRows.filter(r=>!updates.has(rowKey(r))),...parsed.rows];}else bookingRows=parsed.rows;
     bookingUploadAt='Downloaded from Google Sheets';await save();localStorage.setItem(marker,'1');saveRemoteSyncCache(type,meta);renderBooking();}
   return {type,count:parsed.rows.length,localCount:bookingRows.length,sheet,action,mode,skipped:false};
 }
@@ -527,6 +535,8 @@ async function startupSync(){
   const localLoaded=await Promise.race([load(),new Promise(resolve=>setTimeout(()=>resolve(false),7000))]);
   if(localLoaded)setLocalStatus(master.length?'loaded ('+master.length.toLocaleString()+' offices)':'ready',true);
   else if(!navigator.onLine)setLocalStatus('offline; local data check timed out',false);
+  updateMisDateStatuses();
+  renderBooking();
   if(!navigator.onLine){setSyncMessage('Offline — using saved local data. Google Sheets will be checked when online.','error');return;}
   const messages=[];
   setSyncMessage('Checking Google Sheets • Office Master…');
@@ -779,15 +789,16 @@ function parseBookingCsv(rows){
     out._metrics={};bookingMetrics.forEach(k=>out._metrics[k]=numericCell(bookingVal(raw,k)));
     accepted.push(out);
   }
-  // Aggregate repeated product rows by Office ID so every BPO is bucketed once.
-  const byOffice=new Map();
+  // Aggregate repeated product rows by Office ID and Booking Date, preserving date-level rows.
+  const byOfficeDate=new Map();
   accepted.forEach(r=>{
-    let o=byOffice.get(r.office_id);
-    if(!o){o={...r,_metrics:Object.fromEntries(bookingMetrics.map(k=>[k,0]))};byOffice.set(r.office_id,o);}
+    const key=r.office_id+'|'+normalizeBookingDate(r.booking_date);
+    let o=byOfficeDate.get(key);
+    if(!o){o={...r,_metrics:Object.fromEntries(bookingMetrics.map(k=>[k,0]))};byOfficeDate.set(key,o);}
     bookingMetrics.forEach(k=>o._metrics[k]+=numericCell(r._metrics[k]));
     if(!o.product_name)o.product_name=r.product_name;
   });
-  const finalRows=[...byOffice.values()];finalRows.forEach(o=>bookingMetrics.forEach(k=>o[k]=String(o._metrics[k]||0)));
+  const finalRows=[...byOfficeDate.values()];finalRows.forEach(o=>bookingMetrics.forEach(k=>o[k]=String(o._metrics[k]||0)));
   return {rows:finalRows,unknown:[...new Set(unknown)],nonBpo:[...new Set(nonBpo)]};
 }
 function setSelectOptions(id,values,label){
@@ -798,12 +809,37 @@ function setSelectOptions(id,values,label){
 function bookingMasterOffices(){
   return master.filter(isMasterBPO).map(o=>({...o,office_id:normalizeBookingOfficeId(o.office_id),division_name:String(o.division_name||'Unmapped').trim()||'Unmapped',sub_division_name:String(o.sub_division_name||'').trim(),so_name:String(o.so_name||'').trim()}));
 }
+function currentBookingMonthStart(){
+  const now=new Date();
+  return now.getFullYear()+'-'+String(now.getMonth()+1).padStart(2,'0')+'-01';
+}
+function applyBookingDateDefaults(latestDate=''){
+  const fromEl=$('bookingFrom'),toEl=$('bookingTo');
+  if(!fromEl||!toEl||bookingDateRangeTouched)return false;
+  const start=currentBookingMonthStart();
+  const latest=normalizeBookingDate(latestDate)||latestIsoDate(bookingRows,'booking_date');
+  let changed=false;
+  if(fromEl.value!==start){fromEl.value=start;changed=true;}
+  if(toEl.value!==latest){toEl.value=latest;changed=true;}
+  return changed;
+}
+function bookingRowsInSelectedDateRange(){
+  const from=$('bookingFrom')?.value||'',to=$('bookingTo')?.value||'';
+  return bookingRows.filter(r=>{
+    const date=normalizeBookingDate(r.booking_date??bookingVal(r,'booking_date'));
+    if(!date)return !from&&!to;
+    return (!from||date>=from)&&(!to||date<=to);
+  });
+}
 function bookingOfficeMap(){
   const map=new Map();
-  bookingRows.forEach(r=>{
+  bookingRowsInSelectedDateRange().forEach(r=>{
     const id=normalizeBookingOfficeId(r.office_id);if(!id)return;
     if(!map.has(id))map.set(id,{...r,_metrics:Object.fromEntries(bookingMetrics.map(k=>[k,0]))});
-    const a=map.get(id);bookingMetrics.forEach(k=>a._metrics[k]+=numericCell(r._metrics?.[k]??r[k]));
+    const a=map.get(id);
+    bookingMetrics.forEach(k=>a._metrics[k]+=numericCell(r._metrics?.[k]??r[k]));
+    const date=normalizeBookingDate(r.booking_date);
+    if(date&&(!a.booking_date||date>normalizeBookingDate(a.booking_date)))a.booking_date=date;
   });return map;
 }
 function bookingOfficeUniverse(){
@@ -892,7 +928,8 @@ function renderBooking(){
   $('bookingCards').innerHTML=cards.map((c,i)=>`<button type="button" class="booking-card booking-card-button c${i+1}" data-booking-card="${i}"><div class="label">${esc(c[0])}</div><div class="value">${typeof c[1]==='number'?c[1].toLocaleString('en-IN'):c[1].length.toLocaleString('en-IN')}</div><div class="note">Click to view offices</div></button>`).join('');
   [...$('bookingCards').querySelectorAll('[data-booking-card]')].forEach(btn=>btn.onclick=()=>cards[Number(btn.dataset.bookingCard)][2]());
   const div=$('bookingDivision').value,sd=$('bookingSubdivision').value,so=$('bookingSo').value,of=$('bookingOffice').value;
-  $('bookingPeriod').textContent=bookingRows.length?`Reporting snapshot uploaded ${bookingUploadAt||'at an unknown time'} • ${offices.length.toLocaleString()} BPOs in current filter • ${div||'All Divisions'}${sd?' / '+sd:''}${so?' / '+so:''}${of?' / '+of:''}. Total BPO counts come from Office Master; offices missing from the CSV count as nil Walk-in Customer booking.`:'No booking CSV uploaded yet. BPO totals are from Office Master; upload the CSV to calculate booking performance.';
+  const dateRange=($('bookingFrom').value||'—')+' to '+($('bookingTo').value||'latest available');
+  $('bookingPeriod').textContent=bookingRows.length?`Date range ${dateRange} • Reporting snapshot uploaded ${bookingUploadAt||'at an unknown time'} • ${offices.length.toLocaleString()} BPOs in current filter • ${div||'All Divisions'}${sd?' / '+sd:''}${so?' / '+so:''}${of?' / '+of:''}. Total BPO counts come from Office Master; offices missing from the selected period count as nil Walk-in Customer booking.`:'No booking CSV uploaded yet. Date range '+dateRange+'. BPO totals are from Office Master; upload the CSV to calculate booking performance.';
   const heads=[subdivisionMode?'Sub Division Name':'Division Name','No of BPOs','Total SDH Target per Month','Total Paid Article Booking','Total Shortfall','Percentage %','Count BO\'s Booked with Nil','Count BO\'s Booked 1 to 5 Article','Count BO\'s Booked 6 to 10 Article','Count BO\'s Booked above 10 Article'];
   let html='<thead><tr>'+heads.map(h=>'<th>'+esc(h)+'</th>').join('')+'</tr></thead><tbody>';
   if(!summary.length)html+='<tr><td class="empty" colspan="10">No BPO offices in Office Master match the selected filters.</td></tr>';
@@ -950,7 +987,16 @@ $('bookingFile').onchange=async e=>{
   if(id==='bookingSubdivision'){$('bookingSo').value='';$('bookingOffice').value='';}
   if(id==='bookingSo')$('bookingOffice').value='';renderBooking();
 }));
-$('bookingReset').onclick=()=>{['bookingDivision','bookingSubdivision','bookingSo','bookingOffice'].forEach(id=>$(id).value='');renderBooking();};
+['bookingFrom','bookingTo'].forEach(id=>$(id).addEventListener('change',()=>{
+  bookingDateRangeTouched=true;
+  renderBooking();
+}));
+$('bookingReset').onclick=()=>{
+  ['bookingDivision','bookingSubdivision','bookingSo','bookingOffice'].forEach(id=>$(id).value='');
+  bookingDateRangeTouched=false;
+  applyBookingDateDefaults(googleBookingLatestDate||latestIsoDate(bookingRows,'booking_date'));
+  renderBooking();
+};
 $('clearBookingBtn').onclick=async()=>{if(!adminLoggedIn)return alert('Admin login required.');if(!confirm('Clear locally stored BO Booking Performance data?'))return;bookingRows=[];bookingUploadAt='';bookingDirty=false;localStorage.removeItem('nilBoBookingDirty');localStorage.removeItem('nilBoBookingSynced');await save();renderBooking();$('bookingStatus').textContent='Booking data cleared locally. Google sheet is unchanged until a new snapshot is uploaded; clear action does not delete remote data.';};
 async function exportBooking(){
   const offices=bookingFilteredOffices(),summary=bookingDivisionSummary(offices);
