@@ -17,6 +17,7 @@ Inside the existing `doGet(e)`, add these branches before the final unsupported-
   result = getBookingSince_(params.since);
 } else if (action === 'getExclusions') {
   result = getExclusions_();
+}
 ```
 
 Keep the existing actions and their current branches unchanged.
