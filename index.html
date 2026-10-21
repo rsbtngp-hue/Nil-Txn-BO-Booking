@@ -509,14 +509,17 @@ async function fetchGoogleDataset(type){
   if(rows.length&&!matching.length)throw new Error('No valid records returned for '+sheet+'. Check the sheet headers.');
   if(isDaily){
     const pulled=matching.map(canonDaily).filter(r=>r.office_id&&r.transac_date);
-    const dirty=new Set(dirtyDailyMonths);
     const cutoff=since;
+    // Google Sheets is authoritative for the reconciled range. Keep local rows strictly
+    // before the requested start date, then merge every row returned by Google, including
+    // rows in a locally marked dirty month. The old logic retained stale local month rows
+    // and discarded fresh Google rows, causing reports to show only the latest local date.
     const preservedLocal=daily.filter(r=>{
-      const d=normalizeDate(r.transac_date),month=String(d||'').slice(0,7);
-      return dirty.has(month)||!cutoff||d<cutoff;
+      const d=normalizeDate(r.transac_date);
+      return !cutoff||d<cutoff;
     });
-    const merged=[...preservedLocal,...pulled.filter(r=>!dirty.has(String(r.transac_date||'').slice(0,7)))];
-    daily=[...new Map(merged.map(r=>[r.office_id+'|'+r.transac_date,r])).values()];
+    const merged=[...preservedLocal,...pulled];
+    daily=[...new Map(merged.map(r=>[String(r.office_id)+'|'+normalizeDate(r.transac_date),{...r,transac_date:normalizeDate(r.transac_date)}])).values()];
     await save();localStorage.setItem(marker,'1');saveRemoteSyncCache(type,meta);
     localStorage.setItem('nilBoDailyMonthReconciled',JSON.stringify({monthStart:reconcileMonthStart,rows:meta.rows,latest:meta.latest,write:meta.write}));
     return {type,count:pulled.length,localCount:daily.length,sheet,action,mode,skipped:false,since};
