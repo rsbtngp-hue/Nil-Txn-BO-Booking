@@ -423,7 +423,7 @@ async function fetchGoogleDataset(type){
   let rows=[],mode='full';
   if(type==='daily'){
     const localLatest=latestIsoDate(daily,'transac_date'),canDelta=!!(localLatest&&daily.length&&localStorage.getItem(marker)==='1'&&cached&&meta.rows>Number(cached.rows||0));
-    if(canDelta){try{rows=await fetchDailyDelta(localLatest);mode='incremental';}catch(e){rows=await fetchAllGoogleDailyPages();mode='full';}}else rows=await fetchAllGoogleDailyPages();
+    if(canDelta){rows=await fetchDailyDelta(localLatest);mode='incremental';}else rows=await fetchAllGoogleDailyPages();
     const dates=rows.map(r=>normalizeDate(val(r,'transac_date'))).filter(v=>/^\d{4}-\d{2}-\d{2}$/.test(v)).sort();googleDailyLatestDate=String(remote.latestTransactionDate||dates[dates.length-1]||'');
   }else{
     const localLatest=latestIsoDate(bookingRows,'booking_date'),canDelta=!!(localLatest&&bookingRows.length&&localStorage.getItem(marker)==='1'&&cached&&meta.rows>Number(cached.rows||0));
