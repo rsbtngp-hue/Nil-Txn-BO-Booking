@@ -613,6 +613,7 @@ async function uploadLocalDailyMissing(){
   showTransferProgress('Upload Local IndexedDB → Google Sheets','Checking Google Sheets before upload',rows.length);
   try{
     const before=await getGoogleStatus();
+    if(!String(before.version||'').includes('4.3-safe-missing-daily-upload'))throw new Error('The live Apps Script is running version '+String(before.version||'unknown')+'. Please deploy the latest repository script as a NEW web-app version, then retry. No rows were uploaded in this attempt.');
     updateTransferProgress('Preparing safe, duplicate-checked upload',0,rows.length,'Local rows are staged first. The live Daily Nil Transactions sheet is not cleared.');
     await gasCall('beginSync','daily_missing',[],[]);
     const batchSize=500;let sent=0;
