@@ -563,6 +563,7 @@ async function downloadGoogleDailyAndBooking(){
   // Daily Nil Transactions download times out. Never let this auxiliary check block sync.
   try{const remote=await Promise.race([getGoogleStatus(),new Promise(resolve=>setTimeout(()=>resolve(null),10000))]);if(remote)updateMisDateStatuses(remote);}catch(e){}
   setLocalStatus('saved • '+daily.length.toLocaleString()+' daily rows • '+bookingRows.length.toLocaleString()+' booking offices',true);
+  if($('transferProgressModal').style.display==='flex')finishTransferProgress(errors.length?'Download completed with issues':'Google Sheets download and local save complete',!errors.length);
   return {results,errors};
 }
 async function manualGoogleSync(){
@@ -614,7 +615,7 @@ async function uploadLocalDailyMissing(){
     const before=await getGoogleStatus();
     updateTransferProgress('Preparing safe, duplicate-checked upload',0,rows.length,'Local rows are staged first. The live Daily Nil Transactions sheet is not cleared.');
     await gasCall('beginSync','daily_missing',[],[]);
-    const batchSize=250;let sent=0;
+    const batchSize=500;let sent=0;
     for(let i=0;i<rows.length;i+=batchSize){
       const batch=rows.slice(i,i+batchSize);
       await gasCall('saveBatch','daily_missing',batch,[]);
