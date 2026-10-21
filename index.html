@@ -254,6 +254,7 @@ const categories=[['cbs_nil_offices','CBS'],['pli_nil_offices','PLI'],['mail_nil
 let master=[], daily=[], bookingRows=[], bookingUploadAt='', view=[], detailRows=[], detailTitle='Nil office details', dirtyDailyMonths=[];
 let googleDailyLatestDate='', googleBookingLatestDate='';
 let bookingDateRangeTouched=false;
+let localDbReady=false, syncInProgress=false;
 let adminLoggedIn=false, editingOfficeIndex=-1, bookingDirty=false;
 let excludedOfficeIds=new Set();
 try{excludedOfficeIds=new Set(JSON.parse(localStorage.getItem('nilBoExcludedOfficeIds')||'[]').map(x=>String(x)));}catch(e){excludedOfficeIds=new Set();}
@@ -271,6 +272,7 @@ function setLocalStatus(text,ok=true){$('localLabel').textContent='Local DB: '+t
 function markSyncTime(date=new Date()){const s=date.toLocaleString();$('syncTime').textContent='Last sync: '+s;try{localStorage.setItem('nilBoLastSyncTime',date.toISOString());}catch(e){}}
 function restoreSyncTime(){const v=localStorage.getItem('nilBoLastSyncTime');$('syncTime').textContent='Last sync: '+(v?new Date(v).toLocaleString():'not yet');}
 function latestIsoDate(rows,field){return (rows||[]).map(r=>String(r&&r[field]||'').trim()).filter(v=>/^\\d{4}-\\d{2}-\\d{2}$/.test(v)).sort().pop()||'';}
+function latestDatasetDate(rows,field,normalizeFn){return (rows||[]).map(r=>normalizeFn(String(r&&r[field]||'').trim())).filter(v=>/^\d{4}-\d{2}-\d{2}$/.test(String(v||''))).sort().pop()||'';}
 function displayMisDate(value){if(value===undefined||value===null||String(value).trim()==='')return 'Date not available';const raw=String(value).trim();const m=raw.match(/^(\d{4})-(\d{2})-(\d{2})(?:$|T|\s)/);if(m)return m[3]+'-'+m[2]+'-'+m[1];const iso=normalizeDate(value);const n=String(iso||'').match(/^(\d{4})-(\d{2})-(\d{2})$/);return n?n[3]+'-'+n[2]+'-'+n[1]:raw;}
 function updateMisDateStatuses(remoteStatus=null){
   const dailyLocal=latestIsoDate(daily,'transac_date');
@@ -342,8 +344,10 @@ async function load(){
       updateMasterUploadUI();render();renderBooking();updateMisDateStatuses();
       status(`Local database loaded • Office Master: ${master.length.toLocaleString()} • Daily records: ${daily.length.toLocaleString()}`);
     }else status('Local database is ready; no saved records found yet.');
+    localDbReady=true;
     return true;
   }catch(err){
+    localDbReady=false;
     setLocalStatus('unavailable',false);
     status('Could not load local database: '+(err.message||err)+' • Google Sheets check will continue.');
     return false;
@@ -425,31 +429,79 @@ async function fetchDailyDelta(since){
 }
 async function fetchGoogleDataset(type){
   if(!navigator.onLine)throw new Error('Browser is offline.');
-  const action=type==='daily'?'getDaily':'getBooking',sheet=type==='daily'?'Daily Nil Transactions':'BO Booking Performance';
-  const remote=await getGoogleStatus(),meta=remoteDatasetMeta(type,remote),cached=readRemoteSyncCache(type),marker=type==='daily'?'nilBoDailySynced':'nilBoBookingSynced';
-  if(sameRemoteMeta(meta,cached)&&localStorage.getItem(marker)==='1')return {type,count:0,localCount:type==='daily'?daily.length:bookingRows.length,sheet,action,skipped:true,reason:'Google metadata unchanged'};
-  let rows=[],mode='full';
-  if(type==='daily'){
-    const localLatest=latestIsoDate(daily,'transac_date'),canDelta=!!(localLatest&&daily.length&&localStorage.getItem(marker)==='1'&&cached&&meta.rows>Number(cached.rows||0));
-    if(canDelta){rows=await fetchDailyDelta(localLatest);mode='incremental';}else rows=await fetchAllGoogleDailyPages();
-    const dates=rows.map(r=>normalizeDate(val(r,'transac_date'))).filter(v=>/^\d{4}-\d{2}-\d{2}$/.test(v)).sort();googleDailyLatestDate=String(remote.latestTransactionDate||dates[dates.length-1]||'');
-  }else{
-    const localLatest=latestIsoDate(bookingRows,'booking_date'),canDelta=!!(localLatest&&bookingRows.length&&localStorage.getItem(marker)==='1'&&cached&&meta.rows>Number(cached.rows||0));
-    rows=canDelta?await fetchBookingSince(localLatest):await fetchBookingFull();mode=canDelta?'incremental':'full';
+  const isDaily=type==='daily',action=isDaily?'getDaily':'getBooking';
+  const sheet=isDaily?'Daily Nil Transactions':'BO Booking Performance';
+  const remote=await getGoogleStatus(),meta=remoteDatasetMeta(type,remote),cached=readRemoteSyncCache(type);
+  const marker=isDaily?'nilBoDailySynced':'nilBoBookingSynced';
+  const localRows=isDaily?daily:bookingRows;
+  const normalizeFn=isDaily?normalizeDate:normalizeBookingDate;
+  const dateField=isDaily?'transac_date':'booking_date';
+  const localLatest=latestDatasetDate(localRows,dateField,normalizeFn);
+  const remoteLatest=normalizeFn(isDaily?remote.latestTransactionDate:remote.latestBookingDate);
+  const hasLocal=localRows.length>0&&!!localLatest;
+
+  // Keep sheet-derived latest dates available to the MIS labels and date filters.
+  if(isDaily)googleDailyLatestDate=remoteLatest||googleDailyLatestDate;
+  else googleBookingLatestDate=remoteLatest||googleBookingLatestDate;
+
+  // Skip only when local data is usable and its metadata still matches the last successful sync.
+  // Missing/stale browser markers must never force a full download when records already exist.
+  if(hasLocal&&sameRemoteMeta(meta,cached)&&localStorage.getItem(marker)==='1'&&(!remoteLatest||remoteLatest===localLatest)){
+    return {type,count:0,localCount:localRows.length,sheet,action,mode:'unchanged',skipped:true,reason:'Google metadata unchanged',since:localLatest};
   }
-  const matching=rows.filter(r=>type==='daily'?!!String(val(r,'office_id')||'').trim()&&!!normalizeDate(val(r,'transac_date')):!!normalizeBookingOfficeId(bookingVal(r,'office_id')));
+
+  let rows=[],mode='initial',since='';
+  const remoteWentBackwards=!!(hasLocal&&remoteLatest&&remoteLatest<localLatest);
+  if(hasLocal&&!remoteWentBackwards){
+    // The API cutoff is inclusive: it refreshes the last local day for late-arriving rows
+    // and gets later dates only. All older local dates remain untouched.
+    since=localLatest;
+    setSyncMessage('Checking '+sheet+' for new/updated records from '+since+'; existing local rows are retained…');
+    rows=isDaily?await fetchDailyDelta(since):await fetchBookingSince(since);
+    mode='incremental';
+  }else{
+    // Full read only for an empty local cache or when the remote date has moved backwards.
+    if(hasLocal&&remoteWentBackwards)setSyncMessage(sheet+' latest date is older than local data; reconciling the changed dataset…');
+    rows=isDaily?await fetchAllGoogleDailyPages():await fetchBookingFull();
+    mode=hasLocal?'reconcile':'initial';
+  }
+  const matching=rows.filter(r=>isDaily?!!String(val(r,'office_id')||'').trim()&&!!normalizeDate(val(r,'transac_date')):!!normalizeBookingOfficeId(bookingVal(r,'office_id')));
   if(rows.length&&!matching.length)throw new Error('No valid records returned for '+sheet+'. Check the sheet headers.');
-  if(type==='daily'){
-    const pulled=matching.map(canonDaily).filter(r=>r.office_id&&r.transac_date),dirty=new Set(dirtyDailyMonths),keys=new Set(pulled.map(r=>r.office_id+'|'+r.transac_date));
-    const merged=[...daily.filter(r=>dirty.has(String(r.transac_date||'').slice(0,7))),...daily.filter(r=>!dirty.has(String(r.transac_date||'').slice(0,7))&&!keys.has(r.office_id+'|'+r.transac_date)),...pulled.filter(r=>!dirty.has(String(r.transac_date||'').slice(0,7)))];
-    daily=[...new Map(merged.map(r=>[r.office_id+'|'+r.transac_date,r])).values()];await save();localStorage.setItem(marker,'1');saveRemoteSyncCache(type,meta);
-    return {type,count:pulled.length,localCount:daily.length,sheet,action,mode,skipped:false};
+  if(isDaily){
+    const pulled=matching.map(canonDaily).filter(r=>r.office_id&&r.transac_date);
+    const dirty=new Set(dirtyDailyMonths),keys=new Set(pulled.map(r=>r.office_id+'|'+r.transac_date));
+    let merged;
+    if(mode==='reconcile'){
+      const localDirty=daily.filter(r=>dirty.has(String(r.transac_date||'').slice(0,7)));
+      merged=[...localDirty,...pulled.filter(r=>!dirty.has(String(r.transac_date||'').slice(0,7)))];
+    }else{
+      merged=[...daily.filter(r=>dirty.has(String(r.transac_date||'').slice(0,7))),
+        ...daily.filter(r=>!dirty.has(String(r.transac_date||'').slice(0,7))&&!keys.has(r.office_id+'|'+r.transac_date)),
+        ...pulled.filter(r=>!dirty.has(String(r.transac_date||'').slice(0,7)))];
+    }
+    daily=[...new Map(merged.map(r=>[r.office_id+'|'+r.transac_date,r])).values()];
+    await save();localStorage.setItem(marker,'1');saveRemoteSyncCache(type,meta);
+    return {type,count:pulled.length,localCount:daily.length,sheet,action,mode,skipped:false,since};
   }
   const parsed=parseBookingCsv(matching);
   if(matching.length&&!parsed.rows.length)throw new Error('Booking rows returned but none matched Office Master BPO IDs; existing local data retained.');
-  if(!bookingDirty){if(mode==='incremental'){const rowKey=r=>String(r.office_id)+'|'+normalizeBookingDate(r.booking_date);const updates=new Map(parsed.rows.map(r=>[rowKey(r),r]));bookingRows=[...bookingRows.filter(r=>!updates.has(rowKey(r))),...parsed.rows];}else bookingRows=parsed.rows;
-    bookingUploadAt='Downloaded from Google Sheets';await save();localStorage.setItem(marker,'1');saveRemoteSyncCache(type,meta);renderBooking();}
-  return {type,count:parsed.rows.length,localCount:bookingRows.length,sheet,action,mode,skipped:false};
+  if(!bookingDirty){
+    if(mode==='incremental'){
+      const rowKey=r=>String(r.office_id)+'|'+normalizeBookingDate(r.booking_date);
+      const updates=new Map(parsed.rows.map(r=>[rowKey(r),r]));
+      bookingRows=[...bookingRows.filter(r=>!updates.has(rowKey(r))),...parsed.rows];
+    }else bookingRows=parsed.rows;
+    bookingUploadAt='Downloaded from Google Sheets';await save();
+    localStorage.setItem(marker,'1');saveRemoteSyncCache(type,meta);renderBooking();
+  }
+  return {type,count:parsed.rows.length,localCount:bookingRows.length,sheet,action,mode,skipped:false,since};
+}
+
+function describeDatasetSyncResult(x){
+  if(x.skipped)return x.sheet+': local DB is up to date ('+Number(x.localCount||0).toLocaleString()+' local rows; no download needed)';
+  if(x.mode==='incremental')return x.sheet+': incremental check from '+(x.since||'latest local date')+'; '+Number(x.count||0).toLocaleString()+' new/updated rows processed';
+  if(x.mode==='reconcile')return x.sheet+': remote date range reconciled; '+Number(x.count||0).toLocaleString()+' rows received';
+  return x.sheet+': initial local cache created from '+Number(x.count||0).toLocaleString()+' rows';
 }
 async function downloadGoogleDailyAndBooking(){
   await loadSharedOfficeExclusions();
@@ -473,7 +525,10 @@ async function downloadGoogleDailyAndBooking(){
 }
 async function manualGoogleSync(){
   const btn=$('manualGoogleSyncBtn');
+  if(syncInProgress){setSyncMessage('A Google Sheets sync is already running. Please wait for the current sync to finish.');return;}
+  if(!localDbReady){setSyncMessage('Local database has not finished loading. Sync paused to avoid downloading existing records again.','error');return;}
   if(!navigator.onLine){setSyncMessage('Offline — connect to the internet before syncing Google Sheets.','error');return;}
+  syncInProgress=true;
   if(btn)btn.disabled=true;
   if($('syncBtn'))$('syncBtn').disabled=true;
   try{
@@ -482,7 +537,7 @@ async function manualGoogleSync(){
     try{const pulled=await fetchGoogleMaster();messages.push('Office Master '+pulled.count.toLocaleString()+' rows');}
     catch(e){errors.push('Office Master: '+(e.message||e));}
     const data=await downloadGoogleDailyAndBooking();
-    data.results.forEach(x=>messages.push(x.sheet+' '+x.count.toLocaleString()+' rows downloaded'));
+    data.results.forEach(x=>messages.push(describeDatasetSyncResult(x)));
     errors.push(...data.errors);
     const summary=messages.join(' • ')+(errors.length?' • Issues: '+errors.join(' | '):' • All available datasets downloaded and saved locally.');
     setSyncMessage(summary,errors.length?'error':'ok');
@@ -492,6 +547,7 @@ async function manualGoogleSync(){
     const msg='Manual Google Sheets sync failed: '+(e.message||e)+'. Existing local data has been retained.';
     setSyncMessage(msg,'error');status(msg);
   }finally{
+    syncInProgress=false;
     if(btn)btn.disabled=false;
     if($('syncBtn'))$('syncBtn').disabled=false;
   }
@@ -501,7 +557,7 @@ async function manualGoogleSync(){
 const manualSyncControl=$('manualGoogleSyncBtn');
 const mainSyncControl=$('syncBtn');
 if(manualSyncControl){
-  manualSyncControl.disabled=false;
+  manualSyncControl.disabled=true;
   manualSyncControl.addEventListener('click',()=>{
     manualGoogleSync().catch(err=>{
       const msg='Manual Google Sheets sync failed: '+(err&&err.message?err.message:String(err));
@@ -513,7 +569,7 @@ if(manualSyncControl){
   });
 }
 if(mainSyncControl){
-  mainSyncControl.disabled=false;
+  mainSyncControl.disabled=true;
   mainSyncControl.addEventListener('click',()=>{
     Promise.resolve(sync()).catch(err=>{
       const msg='Sync failed: '+(err&&err.message?err.message:String(err));
@@ -526,33 +582,48 @@ if(mainSyncControl){
 async function startupSync(){
   updateNetworkStatus();restoreSyncTime();updateMisDateStatuses();
   const manualBtn=$('manualGoogleSyncBtn'),syncBtn=$('syncBtn');
-  // Never leave manual sync disabled while the automatic startup check is running.
-  if(manualBtn)manualBtn.disabled=false;
-  if(syncBtn)syncBtn.disabled=false;
+  syncInProgress=true;
+  if(manualBtn)manualBtn.disabled=true;
+  if(syncBtn)syncBtn.disabled=true;
   setLocalStatus('opening…',true);
-  setSyncMessage('Opening local database…');
-  // A blocked IndexedDB read must not keep the page in its startup state indefinitely.
-  const localLoaded=await Promise.race([load(),new Promise(resolve=>setTimeout(()=>resolve(false),7000))]);
-  if(localLoaded)setLocalStatus(master.length?'loaded ('+master.length.toLocaleString()+' offices)':'ready',true);
-  else if(!navigator.onLine)setLocalStatus('offline; local data check timed out',false);
-  updateMisDateStatuses();
-  renderBooking();
-  if(!navigator.onLine){setSyncMessage('Offline — using saved local data. Google Sheets will be checked when online.','error');return;}
-  const messages=[];
-  setSyncMessage('Checking Google Sheets • Office Master…');
+  setSyncMessage('Opening local database before checking Google Sheets…');
   try{
-    const pulled=await fetchGoogleMaster();messages.push('Office Master downloaded '+pulled.count.toLocaleString()+' rows');
-  }catch(err){messages.push('Office Master unavailable: '+(err.message||err));}
-  const data=await downloadGoogleDailyAndBooking();
-  data.results.forEach(x=>messages.push(x.sheet+' downloaded '+x.count.toLocaleString()+' rows and saved locally'));
-  data.errors.forEach(x=>messages.push(x));
-  setSyncMessage(messages.length?messages.join(' • '):'Startup check finished.',data.errors.length?'error':'ok');
-  if(bookingDirty&&bookingRows.length){
-    try{await syncBookingToGoogle();}catch(err){$('bookingStatus').textContent='Booking data remains queued locally; Google sync could not be verified: '+(err.message||err);}
+    // Wait for IndexedDB to finish reading before any large Google dataset request.
+    // If the existing DB cannot be read, pause rather than accidentally starting a full download.
+    const localLoaded=await load();
+    if(!localLoaded||!localDbReady){
+      setSyncMessage('Local database could not be read. Automatic data download was paused to protect existing records; reload and retry.','error');
+      return;
+    }
+    setLocalStatus('loaded • '+master.length.toLocaleString()+' master offices • '+daily.length.toLocaleString()+' daily rows • '+bookingRows.length.toLocaleString()+' booking rows',true);
+    updateMisDateStatuses();renderBooking();
+    if(!navigator.onLine){
+      setSyncMessage('Offline — using local IndexedDB records. Google Sheets will be checked when online.','error');
+      return;
+    }
+    const messages=[];
+    try{
+      if(localStorage.getItem('nilBoMasterDirty')!=='1'){
+        const pulled=await fetchGoogleMaster();
+        messages.push('Office Master checked ('+pulled.count.toLocaleString()+' rows)');
+      }else messages.push('Office Master has unsynced local changes; local copy retained');
+    }catch(err){messages.push('Office Master unavailable: '+(err.message||err));}
+    const data=await downloadGoogleDailyAndBooking();
+    data.results.forEach(x=>messages.push(describeDatasetSyncResult(x)));
+    data.errors.forEach(x=>messages.push(x));
+    setSyncMessage(messages.length?messages.join(' • '):'Startup check finished.',data.errors.length?'error':'ok');
+    if(bookingDirty&&bookingRows.length){
+      try{await syncBookingToGoogle();}catch(err){$('bookingStatus').textContent='Booking data remains queued locally; Google sync could not be verified: '+(err.message||err);}
+    }
+  }catch(err){
+    setSyncMessage('Startup sync stopped safely: '+(err&&err.message?err.message:String(err))+' Existing local records were retained.','error');
+  }finally{
+    syncInProgress=false;
+    if(manualBtn)manualBtn.disabled=false;
+    if(syncBtn)syncBtn.disabled=false;
   }
-  if(manualBtn)manualBtn.disabled=false;
-  if(syncBtn)syncBtn.disabled=false;
 }
+
 
 // Convert DD-MM-YYYY or DD/MM/YYYY to YYYY-MM-DD standard date format
 function normalizeDate(dateStr) {
@@ -964,7 +1035,10 @@ async function syncBookingToGoogle(){
   await gasCall('commitBooking','booking',[],[]);
   const st=await getGoogleStatus();
   if(Number(st.bookingRows)!==expected)throw new Error(`Google reports ${Number(st.bookingRows||0)} booking rows; expected ${expected}.`);
-  bookingDirty=false;localStorage.removeItem('nilBoBookingDirty');localStorage.setItem('nilBoBookingSynced','1');await save();markSyncTime();
+  bookingDirty=false;localStorage.removeItem('nilBoBookingDirty');localStorage.setItem('nilBoBookingSynced','1');
+  saveRemoteSyncCache('booking',remoteDatasetMeta('booking',st));
+  googleBookingLatestDate=normalizeBookingDate(st.latestBookingDate)||latestDatasetDate(bookingRows,'booking_date',normalizeBookingDate);
+  await save();markSyncTime();
   $('bookingStatus').textContent=`Google Sheets booking sync verified • ${expected.toLocaleString()} BPO records saved to “BO Booking Performance”.`;
   renderBooking();
 }
@@ -1377,8 +1451,11 @@ function gasCall(action,type,rows=[],months=[]){
 }
 async function getGoogleStatus(){return googleGet('status');}
 async function sync(){
+  if(syncInProgress){setSyncMessage('A Google Sheets sync is already running. Please wait for the current sync to finish.');return;}
+  if(!localDbReady){setSyncMessage('Local database has not finished loading. Sync paused to avoid downloading existing records again.','error');return;}
   if(!navigator.onLine){status('Offline: local database remains available; connect to download Google Sheets data.');return;}
-  $('syncBtn').disabled=true;
+  syncInProgress=true;
+  $('syncBtn').disabled=true;if($('manualGoogleSyncBtn'))$('manualGoogleSyncBtn').disabled=true;
   try{
     setSyncMessage('Downloading latest Google Sheets data…');
     const issues=[];
@@ -1430,7 +1507,7 @@ async function sync(){
   }catch(err){
     status('Google download/sync not verified: '+(err.message||err)+'. Pending changes retained; local data remains available.');
     setSyncMessage('Google Sheets download/sync not verified. '+(err.message||err),'error');
-  }finally{$('syncBtn').disabled=false;}
+  }finally{syncInProgress=false;$('syncBtn').disabled=false;if($('manualGoogleSyncBtn'))$('manualGoogleSyncBtn').disabled=false;}
 }
 // Sync controls are bound earlier so they remain responsive during startup.
 $('division').onchange=()=>{ $('subdivision').value='';$('so').value='';$('office').value='';refreshHierarchy();apply(); };
