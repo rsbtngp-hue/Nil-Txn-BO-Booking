@@ -1,4 +1,4 @@
-# Apps Script upgrade — v4.2
+# Apps Script upgrade — v4.3
 
 The repository now contains a complete, integrated Apps Script file. Use that file rather than manually merging the older add-on snippets.
 
@@ -18,20 +18,22 @@ Open the Google Apps Script project currently used by the dashboard's `APPS_SCRI
 3. Choose **New version**, then deploy.
 4. Keep the same existing `/exec` URL in the dashboard HTML if you edited the existing deployment.
 
-## 3. What v4.2 adds
+## 3. What v4.3 adds
 
 - `GET ?action=getDailySince&since=YYYY-MM-DD`: returns Daily Nil Transactions from the requested date onward.
 - `GET ?action=getBookingSince&since=YYYY-MM-DD`: returns booking rows from the requested booking date onward.
 - `GET ?action=getExclusions`: returns the shared excluded office IDs.
 - `POST {"action":"saveExclusions","excludedOfficeIds":["..."]}`: updates the shared exclusion list.
 - A dedicated `Dashboard Office Exclusions` sheet is created automatically on first use; its columns are `office_id, office_name, excluded, updated_at`.
+- `POST beginSync` + `saveBatch` with `type: "daily_missing"`, followed by `POST {"action":"commitDailyMissing"}` stages local daily rows and merges only missing `office_id + transac_date` keys into `Daily Nil Transactions`. Existing rows and historical months are not cleared.
+- `setupSheets()` creates the hidden `Daily Nil Transactions Upload Staging` sheet needed for this upload action.
 - Existing `health`, `getMaster`, `getDaily`, `getBooking`, `status`, `beginSync`, `saveBatch`, and `commitBooking` actions remain available.
 
-## 4. Verify after deployment
+## 4. One-time setup for the new upload button\n\nAfter replacing the Apps Script source, run `setupSheets()` once from the Apps Script editor and approve the requested permissions. This creates the hidden staging sheet without deleting live Daily Nil Transactions rows. Then deploy a **New version** of the existing web app. The dashboard's new **Upload Local Daily Data** button will report progress and will not clear existing records.\n\n## 5. Verify after deployment
 
 Open these using the current deployed `/exec` URL:
 
-- `?action=health` — should report version `4.2-incremental-exclusions`.
+- `?action=health` — should report version `4.3-safe-missing-daily-upload`.
 - `?action=getDailySince&since=2026-10-15`
 - `?action=getBookingSince&since=2026-10-15`
 - `?action=getExclusions`
