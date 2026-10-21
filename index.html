@@ -271,8 +271,23 @@ function updateNetworkStatus(){const online=navigator.onLine;const p=$('networkP
 function setLocalStatus(text,ok=true){$('localLabel').textContent='Local DB: '+text;$('localPill').classList.toggle('online',!!ok);$('localPill').classList.toggle('offline',!ok);}
 function markSyncTime(date=new Date()){const s=date.toLocaleString();$('syncTime').textContent='Last sync: '+s;try{localStorage.setItem('nilBoLastSyncTime',date.toISOString());}catch(e){}}
 function restoreSyncTime(){const v=localStorage.getItem('nilBoLastSyncTime');$('syncTime').textContent='Last sync: '+(v?new Date(v).toLocaleString():'not yet');}
-function latestIsoDate(rows,field){return (rows||[]).map(r=>String(r&&r[field]||'').trim()).filter(v=>/^\\d{4}-\\d{2}-\\d{2}$/.test(v)).sort().pop()||'';}
-function latestDatasetDate(rows,field,normalizeFn){return (rows||[]).map(r=>normalizeFn(String(r&&r[field]||'').trim())).filter(v=>/^\d{4}-\d{2}-\d{2}$/.test(String(v||''))).sort().pop()||'';}
+function latestIsoDate(rows,field){return latestDatasetDate(rows,field,normalizeDate);}
+function latestDatasetDate(rows,field,normalizeFn){
+  const candidates=field==='transac_date'
+    ?[field,'transaction_date','transactionDate','Transac Date','Transaction Date','date','Date']
+    :[field,'Booking Date','bookingDate','booking date','date','Date'];
+  let latest='';
+  (rows||[]).forEach(r=>{
+    let raw='';
+    for(const key of candidates){
+      if(r&&r[key]!==undefined&&r[key]!==null&&String(r[key]).trim()!==''){raw=r[key];break;}
+    }
+    if(!raw&&r)raw=val(r,field);
+    const normalized=normalizeFn(String(raw??'').trim());
+    if(/^\d{4}-\d{2}-\d{2}$/.test(String(normalized||''))&&normalized>latest)latest=normalized;
+  });
+  return latest;
+}
 function displayMisDate(value){if(value===undefined||value===null||String(value).trim()==='')return 'Date not available';const raw=String(value).trim();const m=raw.match(/^(\d{4})-(\d{2})-(\d{2})(?:$|T|\s)/);if(m)return m[3]+'-'+m[2]+'-'+m[1];const iso=normalizeDate(value);const n=String(iso||'').match(/^(\d{4})-(\d{2})-(\d{2})$/);return n?n[3]+'-'+n[2]+'-'+n[1]:raw;}
 function updateMisDateStatuses(remoteStatus=null){
   const dailyLocal=latestIsoDate(daily,'transac_date');
@@ -438,47 +453,47 @@ async function fetchGoogleDataset(type){
   const dateField=isDaily?'transac_date':'booking_date';
   const localLatest=latestDatasetDate(localRows,dateField,normalizeFn);
   const remoteLatest=normalizeFn(isDaily?remote.latestTransactionDate:remote.latestBookingDate);
-  const hasLocal=localRows.length>0&&!!localLatest;
+  const hasLocalRows=Array.isArray(localRows)&&localRows.length>0;
+  const hasLocal=hasLocalRows&&!!localLatest;
 
-  // Keep sheet-derived latest dates available to the MIS labels and date filters.
   if(isDaily)googleDailyLatestDate=remoteLatest||googleDailyLatestDate;
   else googleBookingLatestDate=remoteLatest||googleBookingLatestDate;
 
-  // Skip only when local data is usable and its metadata still matches the last successful sync.
-  // Missing/stale browser markers must never force a full download when records already exist.
+  // Existing local data must never be treated like an empty cache.
+  // If the date column cannot be understood, stop safely and report the field names.
+  if(hasLocalRows&&!hasLocal){
+    throw new Error(sheet+' has '+localRows.length.toLocaleString()+' local rows, but their latest date could not be read. Full download was blocked to protect the local cache. Local date fields detected: '+Object.keys(localRows[0]||{}).join(', '));
+  }
+
   if(hasLocal&&sameRemoteMeta(meta,cached)&&localStorage.getItem(marker)==='1'&&(!remoteLatest||remoteLatest===localLatest)){
     return {type,count:0,localCount:localRows.length,sheet,action,mode:'unchanged',skipped:true,reason:'Google metadata unchanged',since:localLatest};
   }
 
-  let rows=[],mode='initial',since='';
-  const remoteWentBackwards=!!(hasLocal&&remoteLatest&&remoteLatest<localLatest);
-  if(hasLocal&&!remoteWentBackwards){
-    // The API cutoff is inclusive: it refreshes the last local day for late-arriving rows
-    // and gets later dates only. All older local dates remain untouched.
+  let rows=[],mode=hasLocal?'incremental':'initial',since='';
+  if(hasLocal){
+    // Inclusive cutoff refreshes the latest local day for late arrivals and all later records.
+    // Even if Google reports an older latest date, do not redownload historical data.
     since=localLatest;
-    setSyncMessage('Checking '+sheet+' for new/updated records from '+since+'; existing local rows are retained…');
+    const remoteIsBehind=!!(remoteLatest&&remoteLatest<localLatest);
+    setSyncMessage(remoteIsBehind
+      ?'Local '+sheet+' cache has '+localRows.length.toLocaleString()+' rows. Google latest date is older than local data; checking from local date '+since+' without redownloading history…'
+      :'Local '+sheet+' cache has '+localRows.length.toLocaleString()+' rows. Checking Google for new/updated records from '+since+'…');
     rows=isDaily?await fetchDailyDelta(since):await fetchBookingSince(since);
-    mode='incremental';
   }else{
-    // Full read only for an empty local cache or when the remote date has moved backwards.
-    if(hasLocal&&remoteWentBackwards)setSyncMessage(sheet+' latest date is older than local data; reconciling the changed dataset…');
+    // Only a genuinely empty local cache can begin a full historical download.
+    setSyncMessage('No local '+sheet+' records found. Creating the initial local cache…');
     rows=isDaily?await fetchAllGoogleDailyPages():await fetchBookingFull();
-    mode=hasLocal?'reconcile':'initial';
   }
   const matching=rows.filter(r=>isDaily?!!String(val(r,'office_id')||'').trim()&&!!normalizeDate(val(r,'transac_date')):!!normalizeBookingOfficeId(bookingVal(r,'office_id')));
   if(rows.length&&!matching.length)throw new Error('No valid records returned for '+sheet+'. Check the sheet headers.');
   if(isDaily){
     const pulled=matching.map(canonDaily).filter(r=>r.office_id&&r.transac_date);
     const dirty=new Set(dirtyDailyMonths),keys=new Set(pulled.map(r=>r.office_id+'|'+r.transac_date));
-    let merged;
-    if(mode==='reconcile'){
-      const localDirty=daily.filter(r=>dirty.has(String(r.transac_date||'').slice(0,7)));
-      merged=[...localDirty,...pulled.filter(r=>!dirty.has(String(r.transac_date||'').slice(0,7)))];
-    }else{
-      merged=[...daily.filter(r=>dirty.has(String(r.transac_date||'').slice(0,7))),
-        ...daily.filter(r=>!dirty.has(String(r.transac_date||'').slice(0,7))&&!keys.has(r.office_id+'|'+r.transac_date)),
-        ...pulled.filter(r=>!dirty.has(String(r.transac_date||'').slice(0,7)))];
-    }
+    const merged=[
+      ...daily.filter(r=>dirty.has(String(r.transac_date||'').slice(0,7))),
+      ...daily.filter(r=>!dirty.has(String(r.transac_date||'').slice(0,7))&&!keys.has(r.office_id+'|'+r.transac_date)),
+      ...pulled.filter(r=>!dirty.has(String(r.transac_date||'').slice(0,7)))
+    ];
     daily=[...new Map(merged.map(r=>[r.office_id+'|'+r.transac_date,r])).values()];
     await save();localStorage.setItem(marker,'1');saveRemoteSyncCache(type,meta);
     return {type,count:pulled.length,localCount:daily.length,sheet,action,mode,skipped:false,since};
