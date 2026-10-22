@@ -876,8 +876,18 @@ $('masterFile').onchange = async e => {
 };
 
 async function uploadDailyCsvRowsToGoogle(rows){
-  if(syncInProgress)throw new Error('Another Google Sheets transfer is running. Please wait and retry.');
+  // CSV import can finish while the page's initial/manual sync is still active.
+  // Queue this selected-CSV upload instead of failing immediately or overlapping writes.
   if(!navigator.onLine)throw new Error('Browser is offline. CSV is saved locally; reconnect and upload the selected CSV again.');
+  if(syncInProgress){
+    status('CSV saved locally. Waiting for the current Google Sheets transfer to finish before uploading selected CSV rows…');
+    const waitStarted=Date.now();
+    while(syncInProgress && Date.now()-waitStarted<120000){
+      await new Promise(resolve=>setTimeout(resolve,500));
+    }
+    if(syncInProgress)throw new Error('Another Google Sheets transfer is still running after 2 minutes. The CSV remains saved locally; retry upload after the current transfer finishes.');
+  }
+  // No await occurs between checking the shared lock and acquiring it.
   syncInProgress=true;
   if($('syncBtn'))$('syncBtn').disabled=true;
   if($('manualGoogleSyncBtn'))$('manualGoogleSyncBtn').disabled=true;
