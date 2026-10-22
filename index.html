@@ -875,6 +875,47 @@ $('masterFile').onchange = async e => {
   finally { e.target.value=''; }
 };
 
+async function uploadDailyCsvRowsToGoogle(rows){
+  if(syncInProgress)throw new Error('Another Google Sheets transfer is running. Please wait and retry.');
+  if(!navigator.onLine)throw new Error('Browser is offline. CSV is saved locally; reconnect and upload the selected CSV again.');
+  syncInProgress=true;
+  if($('syncBtn'))$('syncBtn').disabled=true;
+  if($('manualGoogleSyncBtn'))$('manualGoogleSyncBtn').disabled=true;
+  try{
+    const before=await getGoogleStatus();
+    const version=String(before.version||'');
+    if(!['4.3-safe-missing-daily-upload','4.4-selected-csv-booking-append-upsert'].some(v=>version.includes(v))){
+      throw new Error('Live Apps Script version is '+(version||'unknown')+'; it must support commitDailyMissing. CSV remains saved locally.');
+    }
+    const beforeCount=Number(before.dailyRows||0);
+    status('CSV saved locally. Automatically appending only '+rows.length.toLocaleString()+' selected CSV rows to Google Sheets…');
+    await gasCall('beginSync','daily_missing',[],[]);
+    for(let i=0;i<rows.length;i+=500){
+      const batch=rows.slice(i,i+500);
+      await gasCall('saveBatch','daily_missing',batch,[]);
+      status('Automatic CSV upload • '+Math.min(i+batch.length,rows.length).toLocaleString()+' / '+rows.length.toLocaleString()+' selected rows sent to staging…');
+    }
+    await gasCall('commitDailyMissing','daily_missing',[],[]);
+    const after=await getGoogleStatus();
+    const afterCount=Number(after.dailyRows||0);
+    const writeChanged=String(after.lastDailyWrite||'')!==String(before.lastDailyWrite||'');
+    if(afterCount<beforeCount||!writeChanged){
+      throw new Error('Google Sheets did not confirm the CSV append. Local records are retained; please check Apps Script deployment and retry.');
+    }
+    dirtyDailyMonths=(dirtyDailyMonths||[]).filter(m=>!rows.some(r=>String(r.transac_date||'').slice(0,7)===m));
+    localStorage.setItem('nilBoDailySynced','1');
+    saveRemoteSyncCache('daily',remoteDatasetMeta('daily',after));
+    updateMisDateStatuses(after);
+    markSyncTime();
+    const msg='Automatic CSV upload verified • '+rows.length.toLocaleString()+' selected rows processed; Google Daily Nil Transactions now has '+afterCount.toLocaleString()+' rows. No manual sync button required.';
+    status(msg);setSyncMessage(msg,'ok');
+    await save();
+  }finally{
+    syncInProgress=false;
+    if($('syncBtn'))$('syncBtn').disabled=false;
+    if($('manualGoogleSyncBtn'))$('manualGoogleSyncBtn').disabled=false;
+  }
+}
 $('dailyFile').onchange = async e => {
   try {
     if(!adminLoggedIn) throw new Error('Admin login is required to upload Daily transaction CSVs.');
@@ -883,10 +924,8 @@ $('dailyFile').onchange = async e => {
     const parsed = (await parseFiles(e.target.files, 'daily')).filter(x => x.office_id && x.transac_date);
     const knownOfficeIds = new Set(master.map(x => String(x.office_id ?? '').trim()).filter(Boolean));
     const skippedUnknown = parsed.filter(x => !knownOfficeIds.has(String(x.office_id ?? '').trim()));
-    let rows = parsed.filter(x => knownOfficeIds.has(String(x.office_id ?? '').trim()));
+    const rows = parsed.filter(x => knownOfficeIds.has(String(x.office_id ?? '').trim()));
     if(!rows.length) throw new Error(`No valid records matched Office Master. ${skippedUnknown.length.toLocaleString()} row(s) were skipped because their office IDs are missing from Office Master.`);
-    // Only months represented by accepted records are marked dirty. Append upserts Office ID + Transaction Date;
-    // Replace removes existing records only in those uploaded months before importing the CSV.
     const months = [...new Set(rows.map(x => String(x.transac_date).slice(0,7)))];
     const uploadMode = $('dailyUploadMode')?.value || 'append';
     const beforeCount = daily.length;
@@ -908,12 +947,22 @@ $('dailyFile').onchange = async e => {
     await save();
     const yesFlags = rows.reduce((n,r) => n + categories.reduce((m,[k]) => m + (r[k] === 1 ? 1 : 0), 0), 0);
     const noFlags = rows.reduce((n,r) => n + categories.reduce((m,[k]) => m + (r[k] === 0 ? 1 : 0), 0), 0);
-    status(`${uploadMode==='replace'?'Replace-months mode':'Append / update mode'}: accepted ${rows.length.toLocaleString()} CSV rows for ${months.join(', ')} • ${addedCount.toLocaleString()} new office-date keys added • ${updatedCount.toLocaleString()} existing office-date keys updated • skipped ${skippedUnknown.length.toLocaleString()} row(s) whose office ID was not found in Office Master • ${daily.length.toLocaleString()} total office-date records retained (before upload: ${beforeCount.toLocaleString()}). YES=1: ${yesFlags.toLocaleString()} • NO=0: ${noFlags.toLocaleString()}. Sync to update these months in Google Sheets.`);
+    const summary=`${uploadMode==='replace'?'Replace-months mode':'Append / update mode'}: accepted ${rows.length.toLocaleString()} CSV rows for ${months.join(', ')} • ${addedCount.toLocaleString()} new office-date keys added • ${updatedCount.toLocaleString()} existing office-date keys updated • skipped ${skippedUnknown.length.toLocaleString()} row(s) whose office ID was not found in Office Master • ${daily.length.toLocaleString()} total office-date records retained (before upload: ${beforeCount.toLocaleString()}). YES=1: ${yesFlags.toLocaleString()} • NO=0: ${noFlags.toLocaleString()}.`;
+    status(summary+' Automatically uploading selected CSV rows to Google Sheets…');
     render();
-  } catch(err) { status('Daily CSV import failed: '+(err.message||err)); }
-  finally { e.target.value=''; }
+    if(uploadMode==='append'){
+      await uploadDailyCsvRowsToGoogle([...new Map(rows.map(r=>[String(r.office_id).trim()+'|'+String(r.transac_date||'').trim(),r])).values()]);
+    }else{
+      // Replace-months remains a deliberate month-level replacement; run the existing sync workflow automatically.
+      await sync();
+    }
+  } catch(err) {
+    status('Daily CSV saved locally; automatic Google upload not verified: '+(err.message||err)+'. Local IndexedDB data has been retained.');
+    setSyncMessage('Daily CSV saved locally; automatic Google upload not verified: '+(err.message||err),'error');
+  } finally { e.target.value=''; }
 };
 
+// Two-section navigation: each section keeps its own filters and report state.
 // Two-section navigation: each section keeps its own filters and report state.
 function switchAppSection(which){
   const booking=which==='booking';
