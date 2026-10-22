@@ -254,7 +254,7 @@ body[data-theme="violet"] .app-tab#tabNil{background:linear-gradient(125deg,#704
 const APPS_SCRIPT_URL='https://script.google.com/macros/s/AKfycbxV6bArHWZor5PbIewfhkrgwm4IkcCqCvPSyiagfDH-RuykOz4Rk8zOYTE9Z9KyzQJXmA/exec';
 
 const categories=[['cbs_nil_offices','CBS'],['pli_nil_offices','PLI'],['mail_nil_offices','Mail'],['mo_nil_offices','MO'],['stamp_nil_offices','Stamp'],['ippb_nil_offices','IPPB']];
-let master=[], daily=[], bookingRows=[], bookingUploadAt='', view=[], detailRows=[], detailTitle='Nil office details', dirtyDailyMonths=[];
+let master=[], daily=[], bookingRows=[], bookingPendingUploadRows=[], bookingPendingUploadMode='append', bookingUploadAt='', view=[], detailRows=[], detailTitle='Nil office details', dirtyDailyMonths=[];
 let googleDailyLatestDate='', googleBookingLatestDate='';
 let bookingDateRangeTouched=false, nilDateRangeTouched=false;
 let localDbReady=false, syncInProgress=false;
@@ -358,7 +358,7 @@ function db(){
 }
 async function save(){
   let d = await db(), t = d.transaction('data','readwrite');
-  t.objectStore('data').put({master, daily, dirtyDailyMonths, bookingRows, bookingUploadAt, bookingDirty}, 'current');
+  t.objectStore('data').put({master, daily, dirtyDailyMonths, bookingRows, bookingPendingUploadRows, bookingPendingUploadMode, bookingUploadAt, bookingDirty}, 'current');
   return new Promise((resolve,reject) => { t.oncomplete = ()=>{setLocalStatus('saved locally',true);resolve();}; t.onerror=()=>{setLocalStatus('save failed',false);reject(t.error);}; });
 }
 async function load(){
@@ -370,7 +370,7 @@ async function load(){
       tx.onabort=()=>reject(tx.error||new Error('Local database read was interrupted.'));
     });
     if(saved){
-      master=saved.master||[];daily=(saved.daily||[]).map(x=>({...x,transac_date:normalizeDate(x.transac_date)})).filter(x=>x.office_id&&x.transac_date);dirtyDailyMonths=saved.dirtyDailyMonths||[];bookingRows=(saved.bookingRows||[]).map(x=>({...x,booking_date:normalizeBookingDate(x.booking_date)}));bookingUploadAt=saved.bookingUploadAt||'';bookingDirty=!!saved.bookingDirty||localStorage.getItem('nilBoBookingDirty')==='1';
+      master=saved.master||[];daily=(saved.daily||[]).map(x=>({...x,transac_date:normalizeDate(x.transac_date)})).filter(x=>x.office_id&&x.transac_date);dirtyDailyMonths=saved.dirtyDailyMonths||[];bookingRows=(saved.bookingRows||[]).map(x=>({...x,booking_date:normalizeBookingDate(x.booking_date)}));bookingPendingUploadRows=(saved.bookingPendingUploadRows||[]).map(x=>({...x,booking_date:normalizeBookingDate(x.booking_date)}));bookingPendingUploadMode=saved.bookingPendingUploadMode||'append';bookingUploadAt=saved.bookingUploadAt||'';bookingDirty=!!saved.bookingDirty||localStorage.getItem('nilBoBookingDirty')==='1';
       updateMasterUploadUI();render();renderBooking();updateMisDateStatuses();
       status(`Local database loaded • Office Master: ${master.length.toLocaleString()} • Daily records: ${daily.length.toLocaleString()}`);
     }else status('Local database is ready; no saved records found yet.');
@@ -705,9 +705,9 @@ async function startupSync(){
     data.results.forEach(x=>messages.push(describeDatasetSyncResult(x)));
     data.errors.forEach(x=>messages.push(x));
     setSyncMessage(messages.length?messages.join(' • '):'Startup check finished.',data.errors.length?'error':'ok');
-    if(bookingDirty&&bookingRows.length){
-      try{await syncBookingToGoogle();}catch(err){$('bookingStatus').textContent='Booking data remains queued locally; Google sync could not be verified: '+(err.message||err);}
-    }
+    if(bookingDirty&&bookingPendingUploadRows.length){
+      try{await syncBookingToGoogle();}catch(err){$('bookingStatus').textContent='Selected CSV rows remain queued locally; Google sync could not be verified: '+(err.message||err);}
+    }else if(bookingDirty){$('bookingStatus').textContent='Booking changes are saved locally, but no selected-CSV upload queue is available. Select the CSV again to upload only those rows; the full dataset will not be re-uploaded.';}
   }catch(err){
     setSyncMessage('Startup sync stopped safely: '+(err&&err.message?err.message:String(err))+' Existing local records were retained.','error');
   }finally{
@@ -1131,20 +1131,47 @@ function renderBooking(){
 }
 async function syncBookingToGoogle(){
   if(!navigator.onLine)throw new Error('Browser is offline; booking data remains saved locally.');
-  if(!bookingRows.length)throw new Error('No booking rows to sync.');
-  $('bookingStatus').textContent='Uploading booking rows to Google Sheets…';
-  const expected=bookingRows.length;
-  await gasCall('beginSync','booking',[],[]);
-  for(let i=0;i<bookingRows.length;i+=250){await gasCall('saveBatch','booking',bookingRows.slice(i,i+250),[]);$('bookingStatus').textContent=`Uploading BO Booking Performance • ${Math.min(i+250,expected).toLocaleString()} / ${expected.toLocaleString()} rows submitted`;
+  if(!bookingRows.length)throw new Error('No booking rows are available locally.');
+  const uploadMode=bookingPendingUploadMode||'append';
+  const pending=[...(bookingPendingUploadRows||[])];
+  if(!pending.length)throw new Error('No selected CSV rows are queued for Google upload. Please select the CSV again; the full local dataset will not be re-uploaded automatically.');
+  $('bookingStatus').textContent=uploadMode==='replace'?'Replacing Google booking dataset with selected CSV…':'Appending only selected CSV rows to Google Sheets…';
+  const before=await getGoogleStatus();
+  const beforeCount=Number(before.bookingRows||0);
+  const expected=uploadMode==='replace'?bookingRows.length:pending.length;
+  if(uploadMode==='replace'){
+    // Explicit Replace mode remains the only mode that sends the complete local snapshot.
+    await gasCall('beginSync','booking',[],[]);
+    for(let i=0;i<bookingRows.length;i+=250){
+      await gasCall('saveBatch','booking',bookingRows.slice(i,i+250),[]);
+      $('bookingStatus').textContent=`Replace mode: staging ${Math.min(i+250,bookingRows.length).toLocaleString()} / ${bookingRows.length.toLocaleString()} rows`;
+    }
+    await gasCall('commitBooking','booking',[],[]);
+  }else{
+    // Append mode sends ONLY records parsed from the selected CSV. The backend must upsert
+    // by Office ID + Booking Date and append only keys that do not already exist.
+    for(let i=0;i<pending.length;i+=250){
+      const batch=pending.slice(i,i+250);
+      await gasCall('appendBooking','booking',batch,[]);
+      $('bookingStatus').textContent=`Appending selected CSV rows • ${Math.min(i+250,pending.length).toLocaleString()} / ${pending.length.toLocaleString()}`;
+    }
   }
-  await gasCall('commitBooking','booking',[],[]);
   const st=await getGoogleStatus();
-  if(Number(st.bookingRows)!==expected)throw new Error(`Google reports ${Number(st.bookingRows||0)} booking rows; expected ${expected}.`);
-  bookingDirty=false;localStorage.removeItem('nilBoBookingDirty');localStorage.setItem('nilBoBookingSynced','1');
+  const afterCount=Number(st.bookingRows||0);
+  const writeChanged=String(st.lastBookingWrite||st.last_booking_write||'')!==String(before.lastBookingWrite||before.last_booking_write||'');
+  if(uploadMode==='replace'){
+    if(afterCount!==expected)throw new Error(`Google reports ${afterCount} booking rows; expected ${expected}. Replace sync not verified.`);
+  }else{
+    if(afterCount<beforeCount||(!writeChanged&&afterCount===beforeCount))throw new Error('Google Sheets did not confirm the selected-CSV append/upsert. The Apps Script must support the appendBooking action; local data and upload queue have been retained.');
+  }
+  bookingDirty=false;bookingPendingUploadRows=[];bookingPendingUploadMode='append';
+  localStorage.removeItem('nilBoBookingDirty');localStorage.setItem('nilBoBookingSynced','1');
   saveRemoteSyncCache('booking',remoteDatasetMeta('booking',st));
   googleBookingLatestDate=normalizeBookingDate(st.latestBookingDate)||latestDatasetDate(bookingRows,'booking_date',normalizeBookingDate);
   await save();markSyncTime();
-  $('bookingStatus').textContent=`Google Sheets booking sync verified • ${expected.toLocaleString()} BPO records saved to “BO Booking Performance”.`;
+  $('bookingStatus').textContent=uploadMode==='replace'
+    ? `Google Sheets replace verified • ${afterCount.toLocaleString()} booking records saved.`
+    : `Google Sheets append/upsert verified • sent only ${pending.length.toLocaleString()} selected CSV rows; sheet count ${afterCount.toLocaleString()} (before: ${beforeCount.toLocaleString()}). Existing Office ID + Booking Date keys are updated, not duplicated.`;
   renderBooking();
 }
 $('bookingFile').onchange=async e=>{
@@ -1167,7 +1194,7 @@ $('bookingFile').onchange=async e=>{
       result.rows.forEach(r=>{const k=rowKey(r);if(!k||k==='|')return;if(merged.has(k))updatedCount++;else addedCount++;merged.set(k,r);});
       bookingRows=[...merged.values()];
     }
-    bookingUploadAt=new Date().toLocaleString();bookingDirty=true;localStorage.setItem('nilBoBookingDirty','1');await save();renderBooking();
+    bookingPendingUploadRows=[...new Map(result.rows.map(r=>[rowKey(r),r])).values()];bookingPendingUploadMode=uploadMode;bookingUploadAt=new Date().toLocaleString();bookingDirty=true;localStorage.setItem('nilBoBookingDirty','1');await save();renderBooking();
     $('bookingStatus').textContent=uploadMode==='replace'
       ? `Replace mode: ${bookingRows.length.toLocaleString()} BPO date records loaded (previous dataset replaced). Excluded ${result.unknown.length.toLocaleString()} unknown Office ID(s) and ${result.nonBpo.length.toLocaleString()} non-BPO Office ID(s). Starting Google Sheets sync…`
       : `Append mode: ${addedCount.toLocaleString()} new records added; ${updatedCount.toLocaleString()} existing Office ID + Booking Date records updated; ${bookingRows.length.toLocaleString()} total unique records (previous local rows: ${beforeCount.toLocaleString()}). Excluded ${result.unknown.length.toLocaleString()} unknown Office ID(s) and ${result.nonBpo.length.toLocaleString()} non-BPO Office ID(s). Starting Google Sheets sync…`;
@@ -1591,7 +1618,7 @@ function gasCall(action,type,rows=[],months=[]){
   if(window.google && google.script && google.script.run){
     return new Promise((resolve,reject)=>{
       const runner=google.script.run.withSuccessHandler(resolve).withFailureHandler(reject);
-      if(action==='beginSync') runner.beginSync(type,months); else if(action==='saveBatch') runner.saveBatch(type,rows); else if(action==='commitDailyMissing') runner.commitDailyMissing(); else runner.commitBooking();
+      if(action==='beginSync') runner.beginSync(type,months); else if(action==='saveBatch') runner.saveBatch(type,rows); else if(action==='appendBooking') runner.appendBooking(rows); else if(action==='commitDailyMissing') runner.commitDailyMissing(); else runner.commitBooking();
     });
   }
   // Apps Script writes use text/plain to avoid a CORS preflight. Since the browser
