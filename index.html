@@ -150,10 +150,11 @@ body[data-theme="violet"] .app-tab#tabNil{background:linear-gradient(125deg,#704
       <strong>Data management</strong>
       <label class="field" id="masterUploadWrap">Office Master CSV<input id="masterFile" type="file" accept=".csv"></label><button id="replaceMasterBtn" class="secondary hide" type="button">Replace Office Master CSV</button>
       <label class="field">Daily transaction CSV(s)<input id="dailyFile" type="file" accept=".csv" multiple></label>
+      <label class="field">Daily upload mode<select id="dailyUploadMode"><option value="append" selected>Append / update dates (no duplicates)</option><option value="replace">Replace uploaded month(s)</option></select></label>
       <button id="syncBtn" class="secondary">Sync to Google Sheet</button>
       <button id="clearBtn" class="danger">Clear local data</button>
     </div>
-    <div class="note">Office Master is saved locally after import. Daily uploads replace only the uploaded month(s); previous-month data is retained. Changes to Office Master are saved locally and then synced to Google Sheets.</div>
+    <div class="note">Office Master is saved locally after import. Daily upload mode: Append / update dates keeps existing records and adds or updates by Office ID + Transaction Date. Replace uploaded month(s) removes existing records only for the month(s) represented in the CSV, then loads that month’s CSV rows. Other months are retained. Changes to Office Master are saved locally and then synced to Google Sheets.</div>
     <div id="status" class="status"></div>
   </section>
 
@@ -884,18 +885,30 @@ $('dailyFile').onchange = async e => {
     const skippedUnknown = parsed.filter(x => !knownOfficeIds.has(String(x.office_id ?? '').trim()));
     let rows = parsed.filter(x => knownOfficeIds.has(String(x.office_id ?? '').trim()));
     if(!rows.length) throw new Error(`No valid records matched Office Master. ${skippedUnknown.length.toLocaleString()} row(s) were skipped because their office IDs are missing from Office Master.`);
-    // Only months containing accepted Office-Master-matched records are replaced.
-    const months = [...new Set(rows.map(x => x.transac_date.slice(0,7)))];
-    // Monthly replacement: clear old records only for months represented by accepted rows.
-    daily = daily.filter(x => !months.includes(String(x.transac_date||'').slice(0,7)));
-    const map = new Map(daily.map(x => [String(x.office_id).trim() + '|' + x.transac_date, x]));
-    rows.forEach(x => map.set(String(x.office_id).trim() + '|' + x.transac_date, x));
+    // Only months represented by accepted records are marked dirty. Append upserts Office ID + Transaction Date;
+    // Replace removes existing records only in those uploaded months before importing the CSV.
+    const months = [...new Set(rows.map(x => String(x.transac_date).slice(0,7)))];
+    const uploadMode = $('dailyUploadMode')?.value || 'append';
+    const beforeCount = daily.length;
+    if(uploadMode === 'replace') daily = daily.filter(x => !months.includes(String(x.transac_date||'').slice(0,7)));
+    const map = new Map();
+    daily.forEach(x => {
+      const key = String(x.office_id).trim() + '|' + String(x.transac_date||'').trim();
+      if(key !== '|') map.set(key, x);
+    });
+    let addedCount = 0, updatedCount = 0;
+    rows.forEach(x => {
+      const key = String(x.office_id).trim() + '|' + String(x.transac_date||'').trim();
+      if(!key || key === '|') return;
+      if(map.has(key)) updatedCount++; else addedCount++;
+      map.set(key, x);
+    });
     daily = [...map.values()];
     dirtyDailyMonths = [...new Set([...(dirtyDailyMonths||[]), ...months])].sort();
     await save();
     const yesFlags = rows.reduce((n,r) => n + categories.reduce((m,[k]) => m + (r[k] === 1 ? 1 : 0), 0), 0);
     const noFlags = rows.reduce((n,r) => n + categories.reduce((m,[k]) => m + (r[k] === 0 ? 1 : 0), 0), 0);
-    status(`Accepted ${rows.length.toLocaleString()} rows for ${months.join(', ')} • skipped ${skippedUnknown.length.toLocaleString()} row(s) whose office ID was not found in Office Master • replaced only accepted month(s) locally • ${daily.length.toLocaleString()} total office-date records retained. YES=1: ${yesFlags.toLocaleString()} • NO=0: ${noFlags.toLocaleString()}. Sync to update these months in Google Sheets.`);
+    status(`${uploadMode==='replace'?'Replace-months mode':'Append / update mode'}: accepted ${rows.length.toLocaleString()} CSV rows for ${months.join(', ')} • ${addedCount.toLocaleString()} new office-date keys added • ${updatedCount.toLocaleString()} existing office-date keys updated • skipped ${skippedUnknown.length.toLocaleString()} row(s) whose office ID was not found in Office Master • ${daily.length.toLocaleString()} total office-date records retained (before upload: ${beforeCount.toLocaleString()}). YES=1: ${yesFlags.toLocaleString()} • NO=0: ${noFlags.toLocaleString()}. Sync to update these months in Google Sheets.`);
     render();
   } catch(err) { status('Daily CSV import failed: '+(err.message||err)); }
   finally { e.target.value=''; }
