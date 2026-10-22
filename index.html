@@ -211,10 +211,11 @@ body[data-theme="violet"] .app-tab#tabNil{background:linear-gradient(125deg,#704
       <div class="section-head"><h2>Booking CSV Upload</h2><span class="admin-badge">Administrator only</span></div>
       <div class="booking-upload-tools">
         <label class="field">Booking Performance CSV<input id="bookingFile" type="file" accept=".csv,text/csv"></label>
+        <label class="field">Upload mode<select id="bookingUploadMode"><option value="append" selected>Append / update dates (no duplicates)</option><option value="replace">Replace all booking data</option></select></label>
         <button id="clearBookingBtn" class="secondary" type="button">Clear Booking Data</button>
         <button id="exportBookingBtn" class="secondary" type="button">Export Excel</button>
       </div>
-      <div class="note">Expected columns include Circle ID/Name, Region ID/Name, Division ID/Name, Sub Division ID/Name, Office ID/Name, Product Name and booking category columns. Each CSV is a reporting-period snapshot and replaces the previous booking snapshot after successful upload. Accepted BPO records are stored locally and uploaded to the Google Sheet “BO Booking Performance”. BPO count and division are taken from Office Master.</div>
+      <div class="note">Expected columns include Circle ID/Name, Region ID/Name, Division ID/Name, Sub Division ID/Name, Office ID/Name, Product Name and booking category columns. Append / update dates merges the CSV with existing data using Office ID + Booking Date as the unique key; matching records are updated instead of duplicated. Replace all booking data removes the previous booking dataset and saves only the uploaded CSV. Accepted BPO records are stored locally and uploaded to the Google Sheet “BO Booking Performance”. BPO count and division are taken from Office Master.</div>
       <div id="bookingStatus" class="status"></div>
     </section>
     <section class="panel">
@@ -1141,8 +1142,22 @@ $('bookingFile').onchange=async e=>{
     const raw=await new Promise((resolve,reject)=>Papa.parse(file,{header:true,skipEmptyLines:true,complete:r=>resolve(r.data),error:reject}));
     const result=parseBookingCsv(raw);
     if(!result.rows.length)throw new Error('No BPO rows matched Office Master. Check the Office ID column and Office Master office_type_code.');
-    bookingRows=result.rows;bookingUploadAt=new Date().toLocaleString();bookingDirty=true;localStorage.setItem('nilBoBookingDirty','1');await save();renderBooking();
-    $('bookingStatus').textContent=`CSV accepted locally: ${bookingRows.length.toLocaleString()} BPO records. Excluded ${result.unknown.length.toLocaleString()} unknown Office ID(s) and ${result.nonBpo.length.toLocaleString()} non-BPO Office ID(s). Starting Google Sheets sync…`;
+    const uploadMode=$('bookingUploadMode')?.value||'append';
+    const rowKey=r=>normalizeBookingOfficeId(r.office_id)+'|'+normalizeBookingDate(r.booking_date);
+    let beforeCount=bookingRows.length,updatedCount=0,addedCount=0;
+    if(uploadMode==='replace'){
+      bookingRows=[...new Map(result.rows.map(r=>[rowKey(r),r])).values()];
+    }else{
+      // De-duplicate existing local rows first, then upsert incoming Office ID + Booking Date keys.
+      const merged=new Map();
+      bookingRows.forEach(r=>{const k=rowKey(r);if(k!=='|')merged.set(k,r);});
+      result.rows.forEach(r=>{const k=rowKey(r);if(!k||k==='|')return;if(merged.has(k))updatedCount++;else addedCount++;merged.set(k,r);});
+      bookingRows=[...merged.values()];
+    }
+    bookingUploadAt=new Date().toLocaleString();bookingDirty=true;localStorage.setItem('nilBoBookingDirty','1');await save();renderBooking();
+    $('bookingStatus').textContent=uploadMode==='replace'
+      ? `Replace mode: ${bookingRows.length.toLocaleString()} BPO date records loaded (previous dataset replaced). Excluded ${result.unknown.length.toLocaleString()} unknown Office ID(s) and ${result.nonBpo.length.toLocaleString()} non-BPO Office ID(s). Starting Google Sheets sync…`
+      : `Append mode: ${addedCount.toLocaleString()} new records added; ${updatedCount.toLocaleString()} existing Office ID + Booking Date records updated; ${bookingRows.length.toLocaleString()} total unique records (previous local rows: ${beforeCount.toLocaleString()}). Excluded ${result.unknown.length.toLocaleString()} unknown Office ID(s) and ${result.nonBpo.length.toLocaleString()} non-BPO Office ID(s). Starting Google Sheets sync…`;
     await syncBookingToGoogle();
   }catch(err){$('bookingStatus').textContent='Booking CSV saved locally if parsing completed; Google sync not verified: '+(err.message||err)+'. Pending flag retained.';}
   finally{e.target.value='';}
